@@ -21,6 +21,8 @@
 #define WC_LISTBOXW L"LISTBOX"
 #endif
 
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -641,27 +643,307 @@ namespace
         }
     }
 
-    bool EnableDebugPrivilege(OperationResult& result);
+    bool EnableDebugPrivilege(OperationResult& result)
+    {
+        HANDLE token = nullptr;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
+        {
+            const DWORD error = GetLastError();
+            result.Add(L"Открытие токена процесса", error);
+            return false;
+        }
 
-    bool Is64BitOperatingSystem();
+        LUID luid;
+        if (!LookupPrivilegeValueW(nullptr, SE_DEBUG_NAME, &luid))
+        {
+            const DWORD error = GetLastError();
+            result.Add(L"Поиск привилегии SeDebugPrivilege", error);
+            CloseHandle(token);
+            return false;
+        }
 
-    LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+        TOKEN_PRIVILEGES privileges;
+        ZeroMemory(&privileges, sizeof(privileges));
+        privileges.PrivilegeCount = 1;
+        privileges.Privileges[0].Luid = luid;
+        privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
 
-    LRESULT CALLBACK GroupBoxSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+        SetLastError(ERROR_SUCCESS);
+        if (!AdjustTokenPrivileges(token, FALSE, &privileges, sizeof(privileges), nullptr, nullptr))
+        {
+            const DWORD error = GetLastError();
+            result.Add(L"Включение SeDebugPrivilege", error);
+            CloseHandle(token);
+            return false;
+        }
 
-    HWND CreateChildButton(HWND parent, int id, const wchar_t* text, int x, int y, int width, int height);
+        const DWORD adjustError = GetLastError();
+        CloseHandle(token);
 
-    HWND CreateGroupBox(HWND parent, int id, const wchar_t* text, int x, int y, int width, int height);
+        if (adjustError == ERROR_NOT_ALL_ASSIGNED)
+        {
+            result.Add(L"Включение SeDebugPrivilege", adjustError);
+            return false;
+        }
 
-    HWND CreateEventLogList(HWND parent, int id, int x, int y, int width, int height);
+        return true;
+    }
 
-    void AddListViewColumn(HWND list, int index, const wchar_t* text, int width);
+    bool Is64BitOperatingSystem()
+    {
+#if defined(_WIN64)
+        return true;
+#else
+        BOOL wow64 = FALSE;
+        if (IsWow64Process(GetCurrentProcess(), &wow64))
+        {
+            return wow64 != FALSE;
+        }
 
-    HWND CreateReportList(HWND parent, int id, int x, int y, int width, int height);
+        return false;
+#endif
+    }
 
-    void RefreshProcessList(HWND owner);
+    LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        if (message == WM_ERASEBKGND)
+        {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            RECT rect;
+            GetClientRect(hwnd, &rect);
+            FillRect(hdc, &rect, g_app.backgroundBrush);
+            return 1;
+        }
+        return CallWindowProcW(g_oldTabProc, hwnd, message, wParam, lParam);
+    }
 
-    bool GetSelectedListParam(HWND list, LPARAM* value);
+    LRESULT CALLBACK GroupBoxSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        if (message == WM_PAINT)
+        {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+
+            RECT rect;
+            GetClientRect(hwnd, &rect);
+
+            FillRect(hdc, &rect, g_app.backgroundBrush);
+
+            HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(45, 45, 45));
+            HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, borderPen));
+            HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(hdc, GetStockObject(NULL_BRUSH)));
+
+            wchar_t text[256] = L"";
+            GetWindowTextW(hwnd, text, 256);
+
+            SIZE textSize = {0, 0};
+            HFONT oldFont = static_cast<HFONT>(SelectObject(hdc, g_app.font));
+            if (wcslen(text) > 0)
+            {
+                GetTextExtentPoint32W(hdc, text, static_cast<int>(wcslen(text)), &textSize);
+            }
+
+            int topOffset = (textSize.cy > 0) ? (textSize.cy / 2) : 8;
+            Rectangle(hdc, rect.left, rect.top + topOffset, rect.right, rect.bottom);
+
+            if (wcslen(text) > 0)
+            {
+                RECT textRect = rect;
+                textRect.left += 10;
+                textRect.right = textRect.left + textSize.cx + 10;
+                textRect.bottom = textRect.top + textSize.cy;
+
+                FillRect(hdc, &textRect, g_app.backgroundBrush);
+
+                SetTextColor(hdc, RGB(255, 255, 255));
+                SetBkMode(hdc, TRANSPARENT);
+                DrawTextW(hdc, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+
+            SelectObject(hdc, oldFont);
+            SelectObject(hdc, oldPen);
+            SelectObject(hdc, oldBrush);
+            DeleteObject(borderPen);
+
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        return CallWindowProcW(g_oldGroupBoxProc, hwnd, message, wParam, lParam);
+    }
+
+    HWND CreateChildButton(HWND parent, int id, const wchar_t* text, int x, int y, int width, int height)
+    {
+        HWND button = CreateWindowExW(0,
+                                      L"BUTTON",
+                                      text,
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | BS_FLAT,
+                                      x,
+                                      y,
+                                      width,
+                                      height,
+                                      parent,
+                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                                      g_app.instance,
+                                      nullptr);
+        ApplyFont(button);
+        return button;
+    }
+
+    HWND CreateGroupBox(HWND parent, int id, const wchar_t* text, int x, int y, int width, int height)
+    {
+        HWND groupBox = CreateWindowExW(0,
+                                        L"BUTTON",
+                                        text,
+                                        WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                                        x,
+                                        y,
+                                        width,
+                                        height,
+                                        parent,
+                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                                        g_app.instance,
+                                        nullptr);
+        ApplyFont(groupBox);
+
+        WNDPROC oldProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(groupBox, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(GroupBoxSubclassProc)));
+        if (g_oldGroupBoxProc == nullptr)
+        {
+            g_oldGroupBoxProc = oldProc;
+        }
+
+        return groupBox;
+    }
+
+    HWND CreateEventLogList(HWND parent, int id, int x, int y, int width, int height)
+    {
+        HWND list = CreateWindowExW(WS_EX_CLIENTEDGE,
+                                    WC_LISTBOXW,
+                                    L"",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WS_HSCROLL |
+                                    LBS_NOINTEGRALHEIGHT | LBS_DISABLENOSCROLL,
+                                    x,
+                                    y,
+                                    width,
+                                    height,
+                                    parent,
+                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                                    g_app.instance,
+                                    nullptr);
+        ApplyFont(list);
+        SendMessageW(list, LB_SETHORIZONTALEXTENT, 2200, 0);
+        return list;
+    }
+
+    void AddListViewColumn(HWND list, int index, const wchar_t* text, int width)
+    {
+        LVCOLUMNW column;
+        ZeroMemory(&column, sizeof(column));
+        column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        column.pszText = const_cast<LPWSTR>(text);
+        column.cx = width;
+        column.iSubItem = index;
+        ListView_InsertColumn(list, index, &column);
+    }
+
+    HWND CreateReportList(HWND parent, int id, int x, int y, int width, int height)
+    {
+        HWND list = CreateWindowExW(WS_EX_CLIENTEDGE,
+                                    WC_LISTVIEWW,
+                                    L"",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                                    LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                                    x,
+                                    y,
+                                    width,
+                                    height,
+                                    parent,
+                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                                    g_app.instance,
+                                    nullptr);
+
+        ApplyFont(list);
+        ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+        ListView_SetBkColor(list, kColorBackground);
+        ListView_SetTextBkColor(list, kColorBackground);
+        ListView_SetTextColor(list, kColorText);
+        return list;
+    }
+
+    void RefreshProcessList(HWND owner)
+    {
+        ListView_DeleteAllItems(g_app.processList);
+
+        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == INVALID_HANDLE_VALUE)
+        {
+            const DWORD error = GetLastError();
+            ShowWin32Error(owner, L"Создание снимка процессов", error);
+            return;
+        }
+
+        PROCESSENTRY32W entry;
+        ZeroMemory(&entry, sizeof(entry));
+        entry.dwSize = sizeof(entry);
+
+        if (!Process32FirstW(snapshot, &entry))
+        {
+            const DWORD error = GetLastError();
+            CloseHandle(snapshot);
+            ShowWin32Error(owner, L"Чтение первого процесса", error);
+            return;
+        }
+
+        int row = 0;
+        do
+        {
+            LVITEMW item;
+            ZeroMemory(&item, sizeof(item));
+            item.mask = LVIF_TEXT | LVIF_PARAM;
+            item.iItem = row;
+            item.pszText = entry.szExeFile;
+            item.lParam = static_cast<LPARAM>(entry.th32ProcessID);
+
+            const int inserted = ListView_InsertItem(g_app.processList, &item);
+            if (inserted >= 0)
+            {
+                std::wstring pid = std::to_wstring(entry.th32ProcessID);
+                ListView_SetItemText(g_app.processList, inserted, 1, const_cast<LPWSTR>(pid.c_str()));
+            }
+
+            ++row;
+        }
+        while (Process32NextW(snapshot, &entry));
+
+        const DWORD lastError = GetLastError();
+        if (lastError != ERROR_NO_MORE_FILES)
+        {
+            ShowWin32Error(owner, L"Перечисление процессов", lastError);
+        }
+
+        CloseHandle(snapshot);
+    }
+
+    bool GetSelectedListParam(HWND list, LPARAM* value)
+    {
+        const int index = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+        if (index < 0)
+        {
+            return false;
+        }
+
+        LVITEMW item;
+        ZeroMemory(&item, sizeof(item));
+        item.mask = LVIF_PARAM;
+        item.iItem = index;
+
+        if (!ListView_GetItem(list, &item))
+        {
+            return false;
+        }
+
+        *value = item.lParam;
+        return true;
+    }
 
     void KillSelectedProcess(HWND owner)
     {
