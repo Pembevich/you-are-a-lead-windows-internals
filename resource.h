@@ -14,6 +14,13 @@
 #define IDC_BTN_RESTORE_SAFEBOOT               2003
 #define IDC_BTN_FIX_ASSOCIATIONS               2004
 #define IDC_BTN_RESTART_EXPLORER               2005
+#define IDC_BTN_LAUNCH_CMD                     2006
+#define IDC_BTN_LAUNCH_REGEDIT                 2007
+#define IDC_GRP_CRITICAL                       2100
+#define IDC_GRP_SECURITY                       2101
+#define IDC_GRP_ENVIRONMENT                    2102
+#define IDC_GRP_UTILITIES                      2103
+#define IDC_EVENT_LOG                          2104
 
 #define IDC_PROCESS_LIST                       3000
 #define IDC_BTN_KILL_PROCESS                   3001

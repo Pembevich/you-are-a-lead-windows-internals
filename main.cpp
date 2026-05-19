@@ -17,6 +17,10 @@
 
 #include "resource.h"
 
+#ifndef WC_LISTBOXW
+#define WC_LISTBOXW L"LISTBOX"
+#endif
+
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -29,9 +33,9 @@ namespace
     const wchar_t kMainWindowClass[] = L"AegisCoreMainWindow";
     const wchar_t kPageWindowClass[] = L"AegisCorePageWindow";
 
-    const COLORREF kColorBackground = RGB(30, 30, 30);
-    const COLORREF kColorText = RGB(229, 229, 229);
-    const COLORREF kColorAccent = RGB(58, 77, 95);
+    const COLORREF kColorBackground = RGB(18, 18, 18);
+    const COLORREF kColorText = RGB(240, 240, 240);
+    const COLORREF kColorAccent = RGB(45, 45, 45);
 
     const int kClientWidth = 920;
     const int kClientHeight = 600;
@@ -114,9 +118,11 @@ namespace
         HWND pages[3];
         HWND processList;
         HWND startupList;
+        HWND eventLog;
         HBRUSH backgroundBrush;
         HBRUSH accentBrush;
         HFONT font;
+        bool ownsFont;
         std::vector<StartupEntry> startupEntries;
 
         AppState() :
@@ -125,9 +131,11 @@ namespace
             tab(nullptr),
             processList(nullptr),
             startupList(nullptr),
+            eventLog(nullptr),
             backgroundBrush(nullptr),
             accentBrush(nullptr),
-            font(nullptr)
+            font(nullptr),
+            ownsFont(false)
         {
             pages[0] = nullptr;
             pages[1] = nullptr;
@@ -223,33 +231,76 @@ namespace
                lstrcmpiW(dot, L".lnk") == 0;
     }
 
+    std::wstring CurrentTimestamp()
+    {
+        SYSTEMTIME time;
+        GetLocalTime(&time);
+
+        wchar_t buffer[32];
+        swprintf_s(buffer,
+                   L"[%02u:%02u:%02u] ",
+                   static_cast<unsigned>(time.wHour),
+                   static_cast<unsigned>(time.wMinute),
+                   static_cast<unsigned>(time.wSecond));
+        return buffer;
+    }
+
+    void AppendEventLog(const std::wstring& message)
+    {
+        std::wstring line = CurrentTimestamp();
+        line += message;
+
+        if (g_app.eventLog != nullptr)
+        {
+            const LRESULT index = SendMessageW(g_app.eventLog, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(line.c_str()));
+            const LRESULT count = SendMessageW(g_app.eventLog, LB_GETCOUNT, 0, 0);
+            if (count > 0)
+            {
+                SendMessageW(g_app.eventLog, LB_SETTOPINDEX, static_cast<WPARAM>(count - 1), 0);
+            }
+            if (index != LB_ERR && index != LB_ERRSPACE)
+            {
+                return;
+            }
+        }
+
+        OutputDebugStringW(line.c_str());
+        OutputDebugStringW(L"\r\n");
+    }
+
     void ShowResult(HWND owner,
                     const wchar_t* successMessage,
                     const wchar_t* failureTitle,
                     const OperationResult& result)
     {
+        UNREFERENCED_PARAMETER(owner);
+
         if (result.Success())
         {
-            MessageBoxW(owner, successMessage, kApplicationTitle, MB_OK | MB_ICONINFORMATION);
+            if (successMessage != nullptr && successMessage[0] != L'\0')
+            {
+                AppendEventLog(successMessage);
+            }
+            else
+            {
+                AppendEventLog(L"Операция выполнена.");
+            }
             return;
         }
 
-        std::wstring text = L"Операция завершена не полностью:\r\n\r\n";
-        const size_t limit = result.errors.size() < 8 ? result.errors.size() : 8;
-        for (size_t index = 0; index < limit; ++index)
+        const wchar_t* title = failureTitle != nullptr && failureTitle[0] != L'\0'
+            ? failureTitle
+            : L"Операция завершена не полностью";
+
+        for (size_t index = 0; index < result.errors.size(); ++index)
         {
-            text += L"• ";
-            text += result.errors[index];
-            text += L"\r\n";
+            AppendEventLog(std::wstring(title) + L": " + result.errors[index]);
         }
 
-        if (result.errors.size() > limit)
+        if (result.errors.empty())
         {
-            text += L"\r\nДополнительных ошибок: ";
-            text += std::to_wstring(result.errors.size() - limit);
+            AppendEventLog(title);
         }
-
-        MessageBoxW(owner, text.c_str(), failureTitle, MB_OK | MB_ICONWARNING);
     }
 
     void ShowWin32Error(HWND owner, const wchar_t* action, DWORD errorCode)
@@ -257,6 +308,18 @@ namespace
         OperationResult result;
         result.Add(action, errorCode);
         ShowResult(owner, L"", L"Ошибка Win32", result);
+    }
+
+    void ShowFatalWin32Error(const wchar_t* action, DWORD errorCode)
+    {
+        OperationResult result;
+        result.Add(action, errorCode);
+
+        std::wstring text = result.errors.empty()
+            ? std::wstring(L"Критическая ошибка приложения.")
+            : result.errors[0];
+
+        MessageBoxW(nullptr, text.c_str(), kApplicationTitle, MB_OK | MB_ICONERROR);
     }
 
     void ApplyFont(HWND window)
@@ -283,6 +346,8 @@ namespace
         {
         case WM_CTLCOLORBTN:
             return reinterpret_cast<LRESULT>(PaintControl(dc, true));
+        case WM_CTLCOLORLISTBOX:
+            return reinterpret_cast<LRESULT>(PaintControl(dc, false));
         case WM_CTLCOLORDLG:
         case WM_CTLCOLORSTATIC:
             return reinterpret_cast<LRESULT>(PaintControl(dc, false));
@@ -296,6 +361,32 @@ namespace
         RECT clientRect;
         GetClientRect(window, &clientRect);
         FillRect(dc, &clientRect, g_app.backgroundBrush);
+    }
+
+    HFONT CreateApplicationFont()
+    {
+        HDC screenDc = GetDC(nullptr);
+        int height = -16;
+        if (screenDc != nullptr)
+        {
+            height = -MulDiv(16, GetDeviceCaps(screenDc, LOGPIXELSY), 72);
+            ReleaseDC(nullptr, screenDc);
+        }
+
+        return CreateFontW(height,
+                           0,
+                           0,
+                           0,
+                           FW_NORMAL,
+                           FALSE,
+                           FALSE,
+                           FALSE,
+                           DEFAULT_CHARSET,
+                           OUT_DEFAULT_PRECIS,
+                           CLIP_DEFAULT_PRECIS,
+                           DEFAULT_QUALITY,
+                           DEFAULT_PITCH | FF_SWISS,
+                           L"Segoe UI");
     }
 
     LSTATUS CreateRegistryKey(HKEY root,
@@ -503,7 +594,7 @@ namespace
         HWND button = CreateWindowExW(0,
                                       L"BUTTON",
                                       text,
-                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | BS_FLAT,
                                       x,
                                       y,
                                       width,
@@ -514,6 +605,44 @@ namespace
                                       nullptr);
         ApplyFont(button);
         return button;
+    }
+
+    HWND CreateGroupBox(HWND parent, int id, const wchar_t* text, int x, int y, int width, int height)
+    {
+        HWND groupBox = CreateWindowExW(0,
+                                        L"BUTTON",
+                                        text,
+                                        WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                                        x,
+                                        y,
+                                        width,
+                                        height,
+                                        parent,
+                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                                        g_app.instance,
+                                        nullptr);
+        ApplyFont(groupBox);
+        return groupBox;
+    }
+
+    HWND CreateEventLogList(HWND parent, int id, int x, int y, int width, int height)
+    {
+        HWND list = CreateWindowExW(WS_EX_CLIENTEDGE,
+                                    WC_LISTBOXW,
+                                    L"",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WS_HSCROLL |
+                                    LBS_NOINTEGRALHEIGHT | LBS_DISABLENOSCROLL,
+                                    x,
+                                    y,
+                                    width,
+                                    height,
+                                    parent,
+                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                                    g_app.instance,
+                                    nullptr);
+        ApplyFont(list);
+        SendMessageW(list, LB_SETHORIZONTALEXTENT, 2200, 0);
+        return list;
     }
 
     void AddListViewColumn(HWND list, int index, const wchar_t* text, int width)
@@ -632,20 +761,11 @@ namespace
         LPARAM value = 0;
         if (!GetSelectedListParam(g_app.processList, &value))
         {
-            MessageBoxW(owner, L"Выберите процесс в списке.", kApplicationTitle, MB_OK | MB_ICONINFORMATION);
+            AppendEventLog(L"Процесс не выбран.");
             return;
         }
 
         const DWORD pid = static_cast<DWORD>(value);
-        std::wstring question = L"Завершить выбранный процесс с PID ";
-        question += std::to_wstring(pid);
-        question += L"?";
-
-        if (MessageBoxW(owner, question.c_str(), kApplicationTitle, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
-        {
-            return;
-        }
-
         HANDLE process = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
         if (process == nullptr)
         {
@@ -665,7 +785,7 @@ namespace
         }
 
         CloseHandle(process);
-        MessageBoxW(owner, L"Процесс завершён.", kApplicationTitle, MB_OK | MB_ICONINFORMATION);
+        AppendEventLog(L"Процесс завершён: PID " + std::to_wstring(pid) + L".");
         RefreshProcessList(owner);
     }
 
@@ -1005,6 +1125,43 @@ namespace
                    result);
     }
 
+    void LaunchUtility(HWND owner,
+                       const wchar_t* command,
+                       const wchar_t* successMessage,
+                       const wchar_t* errorTitle)
+    {
+        OperationResult result;
+        std::wstring commandLine = command;
+
+        STARTUPINFOW startupInfo;
+        PROCESS_INFORMATION processInfo;
+        ZeroMemory(&startupInfo, sizeof(startupInfo));
+        ZeroMemory(&processInfo, sizeof(processInfo));
+        startupInfo.cb = sizeof(startupInfo);
+
+        if (!CreateProcessW(nullptr,
+                            &commandLine[0],
+                            nullptr,
+                            nullptr,
+                            FALSE,
+                            0,
+                            nullptr,
+                            nullptr,
+                            &startupInfo,
+                            &processInfo))
+        {
+            const DWORD error = GetLastError();
+            result.Add(std::wstring(L"Запуск утилиты ") + command, error);
+        }
+        else
+        {
+            CloseHandle(processInfo.hThread);
+            CloseHandle(processInfo.hProcess);
+        }
+
+        ShowResult(owner, successMessage, errorTitle, result);
+    }
+
     void AddStartupEntryToList(const StartupEntry& entry, size_t index)
     {
         LVITEMW item;
@@ -1219,28 +1376,19 @@ namespace
         LPARAM value = 0;
         if (!GetSelectedListParam(g_app.startupList, &value))
         {
-            MessageBoxW(owner, L"Выберите элемент автозагрузки.", kApplicationTitle, MB_OK | MB_ICONINFORMATION);
+            AppendEventLog(L"Элемент автозагрузки не выбран.");
             return;
         }
 
         const size_t index = static_cast<size_t>(value);
         if (index >= g_app.startupEntries.size())
         {
-            MessageBoxW(owner, L"Выбранный элемент больше недоступен. Обновите список.", kApplicationTitle, MB_OK | MB_ICONWARNING);
+            AppendEventLog(L"Выбранный элемент больше недоступен. Список обновлён.");
             RefreshStartupList(owner);
             return;
         }
 
         const StartupEntry entry = g_app.startupEntries[index];
-        std::wstring question = L"Удалить элемент автозагрузки \"";
-        question += entry.name;
-        question += L"\"?";
-
-        if (MessageBoxW(owner, question.c_str(), kApplicationTitle, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
-        {
-            return;
-        }
-
         OperationResult result;
         if (entry.kind == StartupEntryKind::Registry)
         {
@@ -1301,12 +1449,23 @@ namespace
 
     void CreateRestorePage(HWND parent)
     {
-        CreateChildButton(parent, IDC_BTN_RESTORE_WINLOGON, L"Восстановить Shell и Userinit", 28, 38, 390, 52);
-        CreateChildButton(parent, IDC_BTN_REMOVE_RESTRICTIONS, L"Снять все ограничения ОС", 452, 38, 390, 52);
-        CreateChildButton(parent, IDC_BTN_CLEAR_IFEO, L"Очистить IFEO (Уязвимости)", 28, 116, 390, 52);
-        CreateChildButton(parent, IDC_BTN_RESTORE_SAFEBOOT, L"Восстановить SafeBoot (Безопасный режим)", 452, 116, 390, 52);
-        CreateChildButton(parent, IDC_BTN_FIX_ASSOCIATIONS, L"Исправить ассоциации (.EXE, .LNK)", 28, 194, 390, 52);
-        CreateChildButton(parent, IDC_BTN_RESTART_EXPLORER, L"Перезапустить Проводник", 452, 194, 390, 52);
+        CreateGroupBox(parent, IDC_GRP_CRITICAL, L"Критические параметры", 24, 20, 405, 126);
+        CreateChildButton(parent, IDC_BTN_RESTORE_WINLOGON, L"Восстановить Shell и Userinit", 44, 54, 365, 34);
+        CreateChildButton(parent, IDC_BTN_RESTORE_SAFEBOOT, L"Восстановить SafeBoot (Безопасный режим)", 44, 96, 365, 34);
+
+        CreateGroupBox(parent, IDC_GRP_SECURITY, L"Безопасность", 455, 20, 405, 126);
+        CreateChildButton(parent, IDC_BTN_REMOVE_RESTRICTIONS, L"Снять все ограничения ОС", 475, 54, 365, 34);
+        CreateChildButton(parent, IDC_BTN_CLEAR_IFEO, L"Очистить IFEO (Уязвимости)", 475, 96, 365, 34);
+
+        CreateGroupBox(parent, IDC_GRP_ENVIRONMENT, L"Среда ОС", 24, 162, 405, 126);
+        CreateChildButton(parent, IDC_BTN_FIX_ASSOCIATIONS, L"Исправить ассоциации (.EXE, .LNK)", 44, 196, 365, 34);
+        CreateChildButton(parent, IDC_BTN_RESTART_EXPLORER, L"Перезапустить Проводник", 44, 238, 365, 34);
+
+        CreateGroupBox(parent, IDC_GRP_UTILITIES, L"Утилиты", 455, 162, 405, 126);
+        CreateChildButton(parent, IDC_BTN_LAUNCH_CMD, L"Запустить CMD", 475, 196, 365, 34);
+        CreateChildButton(parent, IDC_BTN_LAUNCH_REGEDIT, L"Запустить Regedit", 475, 238, 365, 34);
+
+        g_app.eventLog = CreateEventLogList(parent, IDC_EVENT_LOG, 24, 312, 836, 194);
     }
 
     void CreateProcessPage(HWND parent)
@@ -1405,6 +1564,12 @@ namespace
         case IDC_BTN_RESTART_EXPLORER:
             RestartExplorer(window);
             break;
+        case IDC_BTN_LAUNCH_CMD:
+            LaunchUtility(window, L"cmd.exe", L"Командная строка запущена.", L"Ошибка запуска CMD");
+            break;
+        case IDC_BTN_LAUNCH_REGEDIT:
+            LaunchUtility(window, L"regedit.exe", L"Редактор реестра запущен.", L"Ошибка запуска Regedit");
+            break;
         case IDC_BTN_KILL_PROCESS:
             KillSelectedProcess(window);
             break;
@@ -1426,6 +1591,7 @@ namespace
         case WM_CTLCOLORDLG:
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN:
+        case WM_CTLCOLORLISTBOX:
             return HandleColorMessage(message, wParam);
         case WM_ERASEBKGND:
             FillWindowBackground(window, reinterpret_cast<HDC>(wParam));
@@ -1466,6 +1632,7 @@ namespace
         case WM_CTLCOLORDLG:
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN:
+        case WM_CTLCOLORLISTBOX:
             return HandleColorMessage(message, wParam);
 
         case WM_ERASEBKGND:
@@ -1487,6 +1654,12 @@ namespace
             {
                 DeleteObject(g_app.accentBrush);
                 g_app.accentBrush = nullptr;
+            }
+            if (g_app.font != nullptr && g_app.ownsFont)
+            {
+                DeleteObject(g_app.font);
+                g_app.font = nullptr;
+                g_app.ownsFont = false;
             }
             PostQuitMessage(0);
             return 0;
@@ -1537,7 +1710,12 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int commandShow)
     g_app.instance = instance;
     g_app.backgroundBrush = CreateSolidBrush(kColorBackground);
     g_app.accentBrush = CreateSolidBrush(kColorAccent);
-    g_app.font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    g_app.font = CreateApplicationFont();
+    g_app.ownsFont = g_app.font != nullptr;
+    if (g_app.font == nullptr)
+    {
+        g_app.font = reinterpret_cast<HFONT>(GetStockObject(SYSTEM_FONT));
+    }
 
     INITCOMMONCONTROLSEX controls;
     ZeroMemory(&controls, sizeof(controls));
@@ -1548,7 +1726,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int commandShow)
     if (!RegisterApplicationClasses(instance))
     {
         const DWORD error = GetLastError();
-        ShowWin32Error(nullptr, L"Регистрация оконных классов", error);
+        ShowFatalWin32Error(L"Регистрация оконных классов", error);
         return 1;
     }
 
@@ -1578,7 +1756,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int commandShow)
     if (window == nullptr)
     {
         const DWORD error = GetLastError();
-        ShowWin32Error(nullptr, L"Создание главного окна", error);
+        ShowFatalWin32Error(L"Создание главного окна", error);
         return 1;
     }
 
