@@ -42,8 +42,8 @@ namespace
     WNDPROC g_oldGroupBoxProc = nullptr;
     WNDPROC g_oldTabProc = nullptr;
 
-    const int kClientWidth = 920;
-    const int kClientHeight = 600;
+    const int kClientWidth = 780;
+    const int kClientHeight = 520;
 
     enum class StartupEntryKind
     {
@@ -374,10 +374,10 @@ namespace
     HFONT CreateApplicationFont()
     {
         HDC screenDc = GetDC(nullptr);
-        int height = -16;
+        int height = -15;
         if (screenDc != nullptr)
         {
-            height = -MulDiv(16, GetDeviceCaps(screenDc, LOGPIXELSY), 72);
+            height = -MulDiv(15, GetDeviceCaps(screenDc, LOGPIXELSY), 72);
             ReleaseDC(nullptr, screenDc);
         }
 
@@ -776,7 +776,7 @@ namespace
         HWND button = CreateWindowExW(0,
                                       L"BUTTON",
                                       text,
-                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | BS_FLAT,
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | BS_FLAT | BS_MULTILINE,
                                       x,
                                       y,
                                       width,
@@ -2032,42 +2032,46 @@ namespace
 
     void CreateRestorePage(HWND parent)
     {
-        CreateGroupBox(parent, IDC_GRP_CRITICAL, L"Критические параметры", 24, 20, 405, 126);
-        CreateChildButton(parent, IDC_BTN_RESTORE_WINLOGON, L"Восстановить Shell и Userinit", 44, 54, 365, 34);
-        CreateChildButton(parent, IDC_BTN_RESTORE_SAFEBOOT, L"Восстановить SafeBoot (Безопасный режим)", 44, 96, 365, 34);
+        // Column 1
+        CreateGroupBox(parent, IDC_GRP_CRITICAL, L"Критические параметры", 15, 15, 350, 100);
+        CreateChildButton(parent, IDC_BTN_RESTORE_WINLOGON, L"Восстановить Shell и Userinit", 25, 39, 330, 28);
+        CreateChildButton(parent, IDC_BTN_RESTORE_SAFEBOOT, L"Восстановить SafeBoot", 25, 77, 330, 28);
 
-        CreateGroupBox(parent, IDC_GRP_SECURITY, L"Безопасность", 455, 20, 405, 126);
-        CreateChildButton(parent, IDC_BTN_REMOVE_RESTRICTIONS, L"Снять все ограничения ОС", 475, 54, 365, 34);
-        CreateChildButton(parent, IDC_BTN_CLEAR_IFEO, L"Очистить IFEO (Уязвимости)", 475, 96, 365, 34);
+        // Column 2
+        CreateGroupBox(parent, IDC_GRP_SECURITY, L"Безопасность", 380, 15, 350, 100);
+        CreateChildButton(parent, IDC_BTN_REMOVE_RESTRICTIONS, L"Снять все ограничения ОС", 390, 39, 330, 28);
+        CreateChildButton(parent, IDC_BTN_CLEAR_IFEO, L"Очистить IFEO-ключи", 390, 77, 330, 28);
 
-        CreateGroupBox(parent, IDC_GRP_ENVIRONMENT, L"Среда ОС", 24, 162, 405, 126);
-        CreateChildButton(parent, IDC_BTN_FIX_ASSOCIATIONS, L"Исправить ассоциации (.EXE, .LNK)", 44, 196, 365, 34);
-        CreateChildButton(parent, IDC_BTN_RESTART_EXPLORER, L"Перезапустить Проводник", 44, 238, 365, 34);
+        // Column 1 Row 2
+        CreateGroupBox(parent, IDC_GRP_ENVIRONMENT, L"Среда ОС", 15, 130, 350, 170);
+        CreateChildButton(parent, IDC_BTN_FIX_ASSOCIATIONS, L"Исправить ассоциации файлов", 25, 175, 330, 28);
+        CreateChildButton(parent, IDC_BTN_RESTART_EXPLORER, L"Перезапустить Проводник", 25, 238, 330, 28);
 
-        CreateGroupBox(parent, IDC_GRP_UTILITIES, L"Утилиты", 455, 162, 405, 126);
-        CreateChildButton(parent, IDC_BTN_LAUNCH_CMD, L"Запустить CMD", 475, 180, 365, 24);
-        CreateChildButton(parent, IDC_BTN_LAUNCH_REGEDIT, L"Запустить Regedit", 475, 208, 365, 24);
-        CreateChildButton(parent, IDC_BTN_RESET_PASSWORD, L"Сбросить пароль на '1'", 475, 236, 365, 24);
-        CreateChildButton(parent, IDC_BTN_LANG_RESCUE, L"Экранная клав. / EN Язык", 475, 264, 365, 24);
+        // Column 2 Row 2
+        CreateGroupBox(parent, IDC_GRP_UTILITIES, L"Утилиты", 380, 130, 350, 170);
+        CreateChildButton(parent, IDC_BTN_LAUNCH_CMD, L"Запустить CMD", 390, 154, 330, 28);
+        CreateChildButton(parent, IDC_BTN_LAUNCH_REGEDIT, L"Запустить Regedit", 390, 190, 330, 28);
+        CreateChildButton(parent, IDC_BTN_RESET_PASSWORD, L"Сбросить пароль на '1'", 390, 226, 330, 28);
+        CreateChildButton(parent, IDC_BTN_LANG_RESCUE, L"Экранная клав. / EN", 390, 262, 330, 28);
 
-        g_app.eventLog = CreateEventLogList(parent, IDC_EVENT_LOG, 24, 312, 836, 194);
+        g_app.eventLog = CreateEventLogList(parent, IDC_EVENT_LOG, 15, 315, 714, 134);
     }
 
     void CreateProcessPage(HWND parent)
     {
-        g_app.processList = CreateReportList(parent, IDC_PROCESS_LIST, 24, 24, 820, 410);
-        AddListViewColumn(g_app.processList, 0, L"Имя процесса", 600);
-        AddListViewColumn(g_app.processList, 1, L"PID", 160);
-        CreateChildButton(parent, IDC_BTN_KILL_PROCESS, L"Завершить процесс", 24, 454, 240, 42);
+        g_app.processList = CreateReportList(parent, IDC_PROCESS_LIST, 15, 15, 714, 389);
+        AddListViewColumn(g_app.processList, 0, L"Имя процесса", 570);
+        AddListViewColumn(g_app.processList, 1, L"PID", 120);
+        CreateChildButton(parent, IDC_BTN_KILL_PROCESS, L"Завершить процесс", 15, 419, 200, 30);
     }
 
     void CreateStartupPage(HWND parent)
     {
-        g_app.startupList = CreateReportList(parent, IDC_STARTUP_LIST, 24, 24, 820, 410);
-        AddListViewColumn(g_app.startupList, 0, L"Имя", 210);
-        AddListViewColumn(g_app.startupList, 1, L"Путь/Команда", 390);
-        AddListViewColumn(g_app.startupList, 2, L"Расположение", 210);
-        CreateChildButton(parent, IDC_BTN_DELETE_STARTUP, L"Удалить автозагрузку", 24, 454, 240, 42);
+        g_app.startupList = CreateReportList(parent, IDC_STARTUP_LIST, 15, 15, 714, 389);
+        AddListViewColumn(g_app.startupList, 0, L"Имя", 180);
+        AddListViewColumn(g_app.startupList, 1, L"Путь/Команда", 320);
+        AddListViewColumn(g_app.startupList, 2, L"Расположение", 190);
+        CreateChildButton(parent, IDC_BTN_DELETE_STARTUP, L"Удалить автозагрузку", 15, 419, 200, 30);
     }
 
     void CreateApplicationControls(HWND window)
@@ -2445,6 +2449,8 @@ namespace
 
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int commandShow)
 {
+    SetProcessDPIAware();
+
     OperationResult privilegeResult;
     EnableDebugPrivilege(privilegeResult);
 
