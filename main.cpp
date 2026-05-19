@@ -34,8 +34,11 @@ namespace
     const wchar_t kPageWindowClass[] = L"AegisCorePageWindow";
 
     const COLORREF kColorBackground = RGB(18, 18, 18);
-    const COLORREF kColorText = RGB(240, 240, 240);
+    const COLORREF kColorText = RGB(255, 255, 255);
     const COLORREF kColorAccent = RGB(45, 45, 45);
+
+    WNDPROC g_oldGroupBoxProc = nullptr;
+    WNDPROC g_oldTabProc = nullptr;
 
     const int kClientWidth = 920;
     const int kClientHeight = 600;
@@ -330,14 +333,6 @@ namespace
         }
     }
 
-    HBRUSH PaintControl(HDC dc, bool accent)
-    {
-        SetTextColor(dc, kColorText);
-        SetBkColor(dc, accent ? kColorAccent : kColorBackground);
-        SetBkMode(dc, OPAQUE);
-        return accent ? g_app.accentBrush : g_app.backgroundBrush;
-    }
-
     LRESULT HandleColorMessage(UINT message, WPARAM wParam)
     {
         HDC dc = reinterpret_cast<HDC>(wParam);
@@ -345,12 +340,21 @@ namespace
         switch (message)
         {
         case WM_CTLCOLORBTN:
-            return reinterpret_cast<LRESULT>(PaintControl(dc, true));
+            SetTextColor(dc, RGB(255, 255, 255));
+            SetBkColor(dc, RGB(45, 45, 45));
+            return reinterpret_cast<LRESULT>(g_app.accentBrush);
         case WM_CTLCOLORLISTBOX:
-            return reinterpret_cast<LRESULT>(PaintControl(dc, false));
+            SetTextColor(dc, RGB(255, 255, 255));
+            SetBkColor(dc, RGB(18, 18, 18));
+            return reinterpret_cast<LRESULT>(g_app.backgroundBrush);
         case WM_CTLCOLORDLG:
+            SetTextColor(dc, RGB(255, 255, 255));
+            SetBkColor(dc, RGB(18, 18, 18));
+            return reinterpret_cast<LRESULT>(g_app.backgroundBrush);
         case WM_CTLCOLORSTATIC:
-            return reinterpret_cast<LRESULT>(PaintControl(dc, false));
+            SetTextColor(dc, RGB(255, 255, 255));
+            SetBkColor(dc, RGB(18, 18, 18));
+            return reinterpret_cast<LRESULT>(g_app.backgroundBrush);
         default:
             return 0;
         }
@@ -589,12 +593,79 @@ namespace
 #endif
     }
 
+    LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        if (message == WM_ERASEBKGND)
+        {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            RECT rect;
+            GetClientRect(hwnd, &rect);
+            FillRect(hdc, &rect, g_app.backgroundBrush);
+            return 1;
+        }
+        return CallWindowProcW(g_oldTabProc, hwnd, message, wParam, lParam);
+    }
+
+    LRESULT CALLBACK GroupBoxSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        if (message == WM_PAINT)
+        {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+
+            RECT rect;
+            GetClientRect(hwnd, &rect);
+
+            FillRect(hdc, &rect, g_app.backgroundBrush);
+
+            HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(45, 45, 45));
+            HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, borderPen));
+            HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(hdc, GetStockObject(NULL_BRUSH)));
+
+            wchar_t text[256] = L"";
+            GetWindowTextW(hwnd, text, 256);
+
+            SIZE textSize = {0, 0};
+            HFONT oldFont = static_cast<HFONT>(SelectObject(hdc, g_app.font));
+            if (wcslen(text) > 0)
+            {
+                GetTextExtentPoint32W(hdc, text, static_cast<int>(wcslen(text)), &textSize);
+            }
+
+            int topOffset = (textSize.cy > 0) ? (textSize.cy / 2) : 8;
+            Rectangle(hdc, rect.left, rect.top + topOffset, rect.right, rect.bottom);
+
+            if (wcslen(text) > 0)
+            {
+                RECT textRect = rect;
+                textRect.left += 10;
+                textRect.right = textRect.left + textSize.cx + 10;
+                textRect.bottom = textRect.top + textSize.cy;
+
+                FillRect(hdc, &textRect, g_app.backgroundBrush);
+
+                SetTextColor(hdc, RGB(255, 255, 255));
+                SetBkMode(hdc, TRANSPARENT);
+                DrawTextW(hdc, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+
+            SelectObject(hdc, oldFont);
+            SelectObject(hdc, oldPen);
+            SelectObject(hdc, oldBrush);
+            DeleteObject(borderPen);
+
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        return CallWindowProcW(g_oldGroupBoxProc, hwnd, message, wParam, lParam);
+    }
+
     HWND CreateChildButton(HWND parent, int id, const wchar_t* text, int x, int y, int width, int height)
     {
         HWND button = CreateWindowExW(0,
                                       L"BUTTON",
                                       text,
-                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | BS_FLAT,
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                       x,
                                       y,
                                       width,
@@ -622,6 +693,13 @@ namespace
                                         g_app.instance,
                                         nullptr);
         ApplyFont(groupBox);
+
+        WNDPROC oldProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(groupBox, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(GroupBoxSubclassProc)));
+        if (g_oldGroupBoxProc == nullptr)
+        {
+            g_oldGroupBoxProc = oldProc;
+        }
+
         return groupBox;
     }
 
@@ -1434,7 +1512,15 @@ namespace
     {
         for (int page = 0; page < 3; ++page)
         {
-            ShowWindow(g_app.pages[page], page == index ? SW_SHOW : SW_HIDE);
+            if (page == index)
+            {
+                ShowWindow(g_app.pages[page], SW_SHOW);
+                SetWindowPos(g_app.pages[page], HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            else
+            {
+                ShowWindow(g_app.pages[page], SW_HIDE);
+            }
         }
 
         if (index == 1)
@@ -1490,7 +1576,7 @@ namespace
         g_app.tab = CreateWindowExW(0,
                                     WC_TABCONTROLW,
                                     L"",
-                                    WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP,
+                                    WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP | TCS_OWNERDRAWFIXED,
                                     14,
                                     14,
                                     kClientWidth - 28,
@@ -1500,6 +1586,8 @@ namespace
                                     g_app.instance,
                                     nullptr);
         ApplyFont(g_app.tab);
+
+        g_oldTabProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(g_app.tab, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(TabSubclassProc)));
 
         TCITEMW tabItem;
         ZeroMemory(&tabItem, sizeof(tabItem));
@@ -1521,10 +1609,10 @@ namespace
 
         for (int index = 0; index < 3; ++index)
         {
-            g_app.pages[index] = CreateWindowExW(0,
+            g_app.pages[index] = CreateWindowExW(WS_EX_CONTROLPARENT,
                                                  kPageWindowClass,
                                                  L"",
-                                                 WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                                                 WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
                                                  tabRect.left,
                                                  tabRect.top,
                                                  tabRect.right - tabRect.left,
@@ -1534,6 +1622,7 @@ namespace
                                                  g_app.instance,
                                                  nullptr);
             ApplyFont(g_app.pages[index]);
+            SetWindowPos(g_app.pages[index], HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
 
         CreateRestorePage(g_app.pages[0]);
@@ -1596,6 +1685,58 @@ namespace
         case WM_ERASEBKGND:
             FillWindowBackground(window, reinterpret_cast<HDC>(wParam));
             return 1;
+        case WM_DRAWITEM:
+        {
+            LPDRAWITEMSTRUCT lpDrawItem = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
+            if (lpDrawItem->CtlType == ODT_BUTTON)
+            {
+                HBRUSH brush = g_app.accentBrush;
+                bool deleteBrush = false;
+
+                if (lpDrawItem->itemState & ODS_SELECTED)
+                {
+                    brush = CreateSolidBrush(RGB(30, 30, 30));
+                    deleteBrush = true;
+                }
+
+                FillRect(lpDrawItem->hDC, &lpDrawItem->rcItem, brush);
+
+                HPEN borderPen = nullptr;
+                if (lpDrawItem->itemState & ODS_FOCUS)
+                {
+                    borderPen = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
+                }
+                else
+                {
+                    borderPen = CreatePen(PS_SOLID, 1, RGB(70, 70, 70));
+                }
+
+                HPEN oldPen = static_cast<HPEN>(SelectObject(lpDrawItem->hDC, borderPen));
+                HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(lpDrawItem->hDC, GetStockObject(NULL_BRUSH)));
+                Rectangle(lpDrawItem->hDC, lpDrawItem->rcItem.left, lpDrawItem->rcItem.top, lpDrawItem->rcItem.right, lpDrawItem->rcItem.bottom);
+                SelectObject(lpDrawItem->hDC, oldPen);
+                SelectObject(lpDrawItem->hDC, oldBrush);
+                DeleteObject(borderPen);
+
+                if (deleteBrush)
+                {
+                    DeleteObject(brush);
+                }
+
+                wchar_t text[256];
+                GetWindowTextW(lpDrawItem->hwndItem, text, 256);
+
+                SetTextColor(lpDrawItem->hDC, RGB(255, 255, 255));
+                SetBkMode(lpDrawItem->hDC, TRANSPARENT);
+
+                HFONT oldFont = static_cast<HFONT>(SelectObject(lpDrawItem->hDC, g_app.font));
+                DrawTextW(lpDrawItem->hDC, text, -1, &lpDrawItem->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(lpDrawItem->hDC, oldFont);
+
+                return TRUE;
+            }
+            break;
+        }
         default:
             return DefWindowProcW(window, message, wParam, lParam);
         }
@@ -1618,15 +1759,108 @@ namespace
         case WM_NOTIFY:
         {
             NMHDR* header = reinterpret_cast<NMHDR*>(lParam);
-            if (header != nullptr && header->hwndFrom == g_app.tab && header->code == TCN_SELCHANGE)
+            if (header != nullptr)
             {
-                const int selected = TabCtrl_GetCurSel(g_app.tab);
-                if (selected >= 0 && selected < 3)
+                if (header->hwndFrom == g_app.tab && header->code == TCN_SELCHANGE)
                 {
-                    ShowPage(selected);
+                    const int selected = TabCtrl_GetCurSel(g_app.tab);
+                    if (selected >= 0 && selected < 3)
+                    {
+                        ShowPage(selected);
+                    }
+                }
+                else if (header->code == NM_CUSTOMDRAW)
+                {
+                    LPNMCUSTOMDRAW lpnmcd = reinterpret_cast<LPNMCUSTOMDRAW>(lParam);
+                    wchar_t className[64] = L"";
+                    GetClassNameW(lpnmcd->hdr.hwndFrom, className, 64);
+                    if (wcscmp(className, L"SysHeader32") == 0)
+                    {
+                        switch (lpnmcd->dwDrawStage)
+                        {
+                        case CDDS_PREPAINT:
+                        {
+                            RECT rect;
+                            GetClientRect(lpnmcd->hdr.hwndFrom, &rect);
+                            FillRect(lpnmcd->hdc, &rect, g_app.accentBrush);
+                            return CDRF_NOTIFYITEMDRAW;
+                        }
+                        case CDDS_ITEMPREPAINT:
+                        {
+                            FillRect(lpnmcd->hdc, &lpnmcd->rc, g_app.accentBrush);
+
+                            HWND listHwnd = GetParent(lpnmcd->hdr.hwndFrom);
+                            LVCOLUMNW col;
+                            ZeroMemory(&col, sizeof(col));
+                            col.mask = LVCF_TEXT;
+                            wchar_t buf[256] = L"";
+                            col.pszText = buf;
+                            col.cchTextMax = 256;
+                            ListView_GetColumn(listHwnd, lpnmcd->dwItemSpec, &col);
+
+                            SetTextColor(lpnmcd->hdc, RGB(255, 255, 255));
+                            SetBkMode(lpnmcd->hdc, TRANSPARENT);
+                            HFONT oldFont = static_cast<HFONT>(SelectObject(lpnmcd->hdc, g_app.font));
+
+                            RECT textRect = lpnmcd->rc;
+                            textRect.left += 6;
+                            DrawTextW(lpnmcd->hdc, buf, -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                            SelectObject(lpnmcd->hdc, oldFont);
+
+                            HPEN pen = CreatePen(PS_SOLID, 1, RGB(60, 60, 60));
+                            HPEN oldPen = static_cast<HPEN>(SelectObject(lpnmcd->hdc, pen));
+                            MoveToEx(lpnmcd->hdc, lpnmcd->rc.right - 1, lpnmcd->rc.top, nullptr);
+                            LineTo(lpnmcd->hdc, lpnmcd->rc.right - 1, lpnmcd->rc.bottom);
+                            SelectObject(lpnmcd->hdc, oldPen);
+                            DeleteObject(pen);
+
+                            return CDRF_SKIPDEFAULT;
+                        }
+                        }
+                    }
                 }
             }
             return 0;
+        }
+
+        case WM_DRAWITEM:
+        {
+            LPDRAWITEMSTRUCT lpDrawItem = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
+            if (lpDrawItem->CtlType == ODT_TAB)
+            {
+                bool selected = (TabCtrl_GetCurSel(g_app.tab) == static_cast<int>(lpDrawItem->itemID));
+                HBRUSH brush = selected ? g_app.accentBrush : CreateSolidBrush(RGB(28, 28, 28));
+                FillRect(lpDrawItem->hDC, &lpDrawItem->rcItem, brush);
+                if (!selected)
+                {
+                    DeleteObject(brush);
+                }
+
+                HPEN pen = CreatePen(PS_SOLID, 1, RGB(60, 60, 60));
+                HPEN oldPen = static_cast<HPEN>(SelectObject(lpDrawItem->hDC, pen));
+                HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(lpDrawItem->hDC, GetStockObject(NULL_BRUSH)));
+                Rectangle(lpDrawItem->hDC, lpDrawItem->rcItem.left, lpDrawItem->rcItem.top, lpDrawItem->rcItem.right, lpDrawItem->rcItem.bottom);
+                SelectObject(lpDrawItem->hDC, oldPen);
+                SelectObject(lpDrawItem->hDC, oldBrush);
+                DeleteObject(pen);
+
+                TCITEMW tcItem;
+                ZeroMemory(&tcItem, sizeof(tcItem));
+                tcItem.mask = TCIF_TEXT;
+                wchar_t text[128] = L"";
+                tcItem.pszText = text;
+                tcItem.cchTextMax = 128;
+                TabCtrl_GetItem(g_app.tab, lpDrawItem->itemID, &tcItem);
+
+                SetTextColor(lpDrawItem->hDC, RGB(255, 255, 255));
+                SetBkMode(lpDrawItem->hDC, TRANSPARENT);
+                HFONT oldFont = static_cast<HFONT>(SelectObject(lpDrawItem->hDC, g_app.font));
+                DrawTextW(lpDrawItem->hDC, text, -1, &lpDrawItem->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(lpDrawItem->hDC, oldFont);
+
+                return TRUE;
+            }
+            break;
         }
 
         case WM_CTLCOLORDLG:
@@ -1730,7 +1964,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int commandShow)
         return 1;
     }
 
-    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
     DWORD exStyle = 0;
 
     RECT windowRect;
