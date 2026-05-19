@@ -464,7 +464,12 @@ namespace
                                 REG_SZ,
                                 reinterpret_cast<const BYTE*>(data),
                                 byteCount);
-        if (status != ERROR_SUCCESS)
+        if (status == ERROR_SUCCESS)
+        {
+            std::wstring name = valueName != nullptr && valueName[0] != L'\0' ? valueName : L"(по умолчанию)";
+            AppendEventLog(L"[OK] Записано значение " + name + L" = \"" + data + L"\"");
+        }
+        else
         {
             std::wstring name = valueName != nullptr && valueName[0] != L'\0' ? valueName : L"(по умолчанию)";
             result.Add(L"Запись значения " + name + L" в " + JoinRegistryLocation(root, subKey, view), status);
@@ -493,7 +498,11 @@ namespace
         }
 
         status = RegDeleteValueW(key, valueName);
-        if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+        if (status == ERROR_SUCCESS)
+        {
+            AppendEventLog(L"[OK] Ограничение " + std::wstring(valueName) + L" успешно удалено.");
+        }
+        else if (status != ERROR_FILE_NOT_FOUND)
         {
             std::wstring name = valueName != nullptr && valueName[0] != L'\0' ? valueName : L"(по умолчанию)";
             result.Add(L"Удаление значения " + name + L" из " + JoinRegistryLocation(root, subKey, view), status);
@@ -523,13 +532,53 @@ namespace
         }
 
         status = RegDeleteValueW(key, valueName);
-        if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+        if (status == ERROR_SUCCESS)
+        {
+            AppendEventLog(L"[OK] Параметр " + std::wstring(valueName) + L" успешно удален.");
+        }
+        else if (status != ERROR_FILE_NOT_FOUND)
         {
             std::wstring name = valueName != nullptr && valueName[0] != L'\0' ? valueName : L"(по умолчанию)";
             result.Add(L"Удаление значения " + name + L" из " + JoinRegistryLocation(root, subKey, view), status);
         }
 
         RegCloseKey(key);
+    }
+
+    void DeleteRegistryKeyIfExists(OperationResult& result,
+                                   HKEY root,
+                                   const wchar_t* subKey,
+                                   REGSAM view)
+    {
+        HMODULE advapi = GetModuleHandleW(L"advapi32.dll");
+        typedef LSTATUS (APIENTRY *PFN_RegDeleteKeyExW)(HKEY, LPCWSTR, REGSAM, DWORD);
+        PFN_RegDeleteKeyExW pRegDeleteKeyExW = nullptr;
+        if (advapi)
+        {
+            pRegDeleteKeyExW = reinterpret_cast<PFN_RegDeleteKeyExW>(GetProcAddress(advapi, "RegDeleteKeyExW"));
+        }
+
+        LSTATUS status;
+        if (pRegDeleteKeyExW)
+        {
+            status = pRegDeleteKeyExW(root, subKey, view, 0);
+        }
+        else
+        {
+            status = RegDeleteKeyW(root, subKey);
+        }
+
+        if (status == ERROR_SUCCESS)
+        {
+            std::wstring keyName = subKey;
+            size_t pos = keyName.find_last_of(L'\\');
+            std::wstring leaf = (pos != std::wstring::npos) ? keyName.substr(pos + 1) : keyName;
+            AppendEventLog(L"[OK] Ветка IFEO " + leaf + L" уничтожена.");
+        }
+        else if (status != ERROR_FILE_NOT_FOUND && status != ERROR_PATH_NOT_FOUND)
+        {
+            result.Add(L"Удаление ключа " + JoinRegistryLocation(root, subKey, view), status);
+        }
     }
 
     bool EnableDebugPrivilege(OperationResult& result)
@@ -871,6 +920,19 @@ namespace
     {
         OperationResult result;
         const wchar_t subKey[] = L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon";
+
+        HKEY hKey = nullptr;
+        LSTATUS status = CreateRegistryKey(HKEY_LOCAL_MACHINE, subKey, KEY_WRITE, KEY_WOW64_64KEY, &hKey);
+        if (status == ERROR_SUCCESS)
+        {
+            AppendEventLog(L"[INFO] Структура раздела Winlogon проверена/воссоздана.");
+            RegCloseKey(hKey);
+        }
+        else
+        {
+            result.Add(L"Создание ветки Winlogon", status);
+        }
+
         SetRegistryString(result, HKEY_LOCAL_MACHINE, subKey, L"Shell", L"explorer.exe", KEY_WOW64_64KEY);
         SetRegistryString(result, HKEY_LOCAL_MACHINE, subKey, L"Userinit", L"C:\\Windows\\system32\\userinit.exe,", KEY_WOW64_64KEY);
 
@@ -898,6 +960,18 @@ namespace
 
         for (size_t keyIndex = 0; keyIndex < sizeof(policyKeys) / sizeof(policyKeys[0]); ++keyIndex)
         {
+            // Auto-create parent path if missing
+            HKEY hKeyCU = nullptr;
+            if (CreateRegistryKey(HKEY_CURRENT_USER, policyKeys[keyIndex], KEY_WRITE, 0, &hKeyCU) == ERROR_SUCCESS)
+            {
+                RegCloseKey(hKeyCU);
+            }
+            HKEY hKeyLM = nullptr;
+            if (CreateRegistryKey(HKEY_LOCAL_MACHINE, policyKeys[keyIndex], KEY_WRITE, KEY_WOW64_64KEY, &hKeyLM) == ERROR_SUCCESS)
+            {
+                RegCloseKey(hKeyLM);
+            }
+
             for (size_t valueIndex = 0; valueIndex < sizeof(values) / sizeof(values[0]); ++valueIndex)
             {
                 DeleteRegistryValueIfExists(result, HKEY_CURRENT_USER, policyKeys[keyIndex], values[valueIndex], 0);
@@ -927,20 +1001,10 @@ namespace
         {
             std::wstring key = baseKey;
             key += targets[index];
-            DeleteRegistryValueWithAccessIfExists(result,
-                                                  HKEY_LOCAL_MACHINE,
-                                                  key.c_str(),
-                                                  L"Debugger",
-                                                  KEY_ALL_ACCESS | KEY_WOW64_64KEY,
-                                                  KEY_WOW64_64KEY);
+            DeleteRegistryKeyIfExists(result, HKEY_LOCAL_MACHINE, key.c_str(), KEY_WOW64_64KEY);
             if (Is64BitOperatingSystem())
             {
-                DeleteRegistryValueWithAccessIfExists(result,
-                                                      HKEY_LOCAL_MACHINE,
-                                                      key.c_str(),
-                                                      L"Debugger",
-                                                      KEY_ALL_ACCESS | KEY_WOW64_32KEY,
-                                                      KEY_WOW64_32KEY);
+                DeleteRegistryKeyIfExists(result, HKEY_LOCAL_MACHINE, key.c_str(), KEY_WOW64_32KEY);
             }
         }
 
@@ -975,7 +1039,11 @@ namespace
                                 REG_SZ,
                                 reinterpret_cast<const BYTE*>(value),
                                 byteCount);
-        if (status != ERROR_SUCCESS)
+        if (status == ERROR_SUCCESS)
+        {
+            AppendEventLog(L"[OK] SafeBoot (" + std::wstring(branch) + L"): " + std::wstring(entryName) + L" = \"" + value + L"\"");
+        }
+        else
         {
             result.Add(L"Запись значения SafeBoot для " + subKey, status);
         }
@@ -986,6 +1054,31 @@ namespace
     void RestoreSafeBoot(HWND owner)
     {
         OperationResult result;
+
+        HKEY hKeyMinimal = nullptr;
+        LSTATUS statusMin = CreateRegistryKey(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\SafeBoot\\Minimal", KEY_WRITE, 0, &hKeyMinimal);
+        if (statusMin == ERROR_SUCCESS)
+        {
+            AppendEventLog(L"[INFO] Структура SafeBoot\\Minimal воссоздана.");
+            RegCloseKey(hKeyMinimal);
+        }
+        else
+        {
+            result.Add(L"Создание SafeBoot\\Minimal", statusMin);
+        }
+
+        HKEY hKeyNetwork = nullptr;
+        LSTATUS statusNet = CreateRegistryKey(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\SafeBoot\\Network", KEY_WRITE, 0, &hKeyNetwork);
+        if (statusNet == ERROR_SUCCESS)
+        {
+            AppendEventLog(L"[INFO] Структура SafeBoot\\Network воссоздана.");
+            RegCloseKey(hKeyNetwork);
+        }
+        else
+        {
+            result.Add(L"Создание SafeBoot\\Network", statusNet);
+        }
+
         SetRegistryString(result,
                           HKEY_LOCAL_MACHINE,
                           L"SYSTEM\\CurrentControlSet\\Control\\SafeBoot\\Minimal",
@@ -1072,6 +1165,35 @@ namespace
     void FixExecutableAssociations(HWND owner)
     {
         OperationResult result;
+
+        HKEY hKeyExe = nullptr;
+        if (CreateRegistryKey(HKEY_CLASSES_ROOT, L".exe", KEY_WRITE, 0, &hKeyExe) == ERROR_SUCCESS)
+        {
+            AppendEventLog(L"[INFO] Раздел реестра .exe воссоздан.");
+            RegCloseKey(hKeyExe);
+        }
+
+        HKEY hKeyExeCmd = nullptr;
+        if (CreateRegistryKey(HKEY_CLASSES_ROOT, L"exefile\\shell\\open\\command", KEY_WRITE, 0, &hKeyExeCmd) == ERROR_SUCCESS)
+        {
+            AppendEventLog(L"[INFO] Раздел реестра exefile\\shell\\open\\command воссоздан.");
+            RegCloseKey(hKeyExeCmd);
+        }
+
+        HKEY hKeyLnk = nullptr;
+        if (CreateRegistryKey(HKEY_CLASSES_ROOT, L".lnk", KEY_WRITE, 0, &hKeyLnk) == ERROR_SUCCESS)
+        {
+            AppendEventLog(L"[INFO] Раздел реестра .lnk воссоздан.");
+            RegCloseKey(hKeyLnk);
+        }
+
+        HKEY hKeyLnkFile = nullptr;
+        if (CreateRegistryKey(HKEY_CLASSES_ROOT, L"lnkfile", KEY_WRITE, 0, &hKeyLnkFile) == ERROR_SUCCESS)
+        {
+            AppendEventLog(L"[INFO] Раздел реестра lnkfile воссоздан.");
+            RegCloseKey(hKeyLnkFile);
+        }
+
         SetRegistryString(result, HKEY_CLASSES_ROOT, L".exe", nullptr, L"exefile", 0);
         SetRegistryString(result, HKEY_CLASSES_ROOT, L"exefile\\shell\\open\\command", nullptr, L"\"%1\" %*", 0);
         SetRegistryString(result, HKEY_CLASSES_ROOT, L".lnk", nullptr, L"lnkfile", 0);
@@ -1238,6 +1360,92 @@ namespace
         }
 
         ShowResult(owner, successMessage, errorTitle, result);
+    }
+
+    void RunLanguageRescue(HWND owner)
+    {
+        AppendEventLog(L"[INFO] Запуск спасательной службы ввода...");
+
+        // 1. Force load and activate EN keyboard layout
+        HKL hkl = LoadKeyboardLayoutW(L"00000409", KLF_ACTIVATE | KLF_SETFORPROCESS);
+        if (hkl != nullptr)
+        {
+            AppendEventLog(L"[OK] Раскладка EN (00000409) загружена в процесс.");
+            // Apply to foreground window and broadcast
+            HWND fg = GetForegroundWindow();
+            if (fg != nullptr)
+            {
+                PostMessageW(fg, WM_INPUTLANGCHANGEREQUEST, INPUTLANGCHANGE_SYSCHARSET, reinterpret_cast<LPARAM>(hkl));
+                PostMessageW(HWND_BROADCAST, WM_INPUTLANGCHANGEREQUEST, INPUTLANGCHANGE_SYSCHARSET, reinterpret_cast<LPARAM>(hkl));
+                AppendEventLog(L"[OK] Запрос WM_INPUTLANGCHANGEREQUEST отправлен активным окнам.");
+            }
+        }
+        else
+        {
+            AppendEventLog(L"[ERROR] Ошибка вызова LoadKeyboardLayoutW: " + std::to_wstring(GetLastError()));
+        }
+
+        // 2. Launch osk.exe (On-Screen Keyboard) from System32 with WOW64 redirection disabled
+        wchar_t sysDir[MAX_PATH];
+        if (GetSystemDirectoryW(sysDir, MAX_PATH) != 0)
+        {
+            std::wstring oskPath = std::wstring(sysDir) + L"\\osk.exe";
+            STARTUPINFOW si;
+            PROCESS_INFORMATION pi;
+            ZeroMemory(&si, sizeof(si));
+            si.cb = sizeof(si);
+            ZeroMemory(&pi, sizeof(pi));
+
+            PVOID oldRedirectState = nullptr;
+            HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+            typedef BOOL (WINAPI *PFN_Wow64DisableWow64FsRedirection)(PVOID*);
+            typedef BOOL (WINAPI *PFN_Wow64RevertWow64FsRedirection)(PVOID);
+            
+            PFN_Wow64DisableWow64FsRedirection pDisable = nullptr;
+            PFN_Wow64RevertWow64FsRedirection pRevert = nullptr;
+            if (kernel32)
+            {
+                pDisable = reinterpret_cast<PFN_Wow64DisableWow64FsRedirection>(GetProcAddress(kernel32, "Wow64DisableWow64FsRedirection"));
+                pRevert = reinterpret_cast<PFN_Wow64RevertWow64FsRedirection>(GetProcAddress(kernel32, "Wow64RevertWow64FsRedirection"));
+            }
+
+            if (pDisable)
+            {
+                pDisable(&oldRedirectState);
+            }
+
+            BOOL success = CreateProcessW(oskPath.c_str(),
+                                         nullptr,
+                                         nullptr,
+                                         nullptr,
+                                         FALSE,
+                                         0,
+                                         nullptr,
+                                         nullptr,
+                                         &si,
+                                         &pi);
+
+            if (pRevert && oldRedirectState)
+            {
+                pRevert(oldRedirectState);
+            }
+
+            if (success)
+            {
+                AppendEventLog(L"[OK] Экранная клавиатура (osk.exe) успешно запущена.");
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+            }
+            else
+            {
+                DWORD err = GetLastError();
+                AppendEventLog(L"[ERROR] Не удалось запустить osk.exe (код ошибки: " + std::to_wstring(err) + L").");
+            }
+        }
+        else
+        {
+            AppendEventLog(L"[ERROR] Не удалось получить путь к System32.");
+        }
     }
 
     void AddStartupEntryToList(const StartupEntry& entry, size_t index)
@@ -1548,8 +1756,9 @@ namespace
         CreateChildButton(parent, IDC_BTN_RESTART_EXPLORER, L"Перезапустить Проводник", 44, 238, 365, 34);
 
         CreateGroupBox(parent, IDC_GRP_UTILITIES, L"Утилиты", 455, 162, 405, 126);
-        CreateChildButton(parent, IDC_BTN_LAUNCH_CMD, L"Запустить CMD", 475, 196, 365, 34);
-        CreateChildButton(parent, IDC_BTN_LAUNCH_REGEDIT, L"Запустить Regedit", 475, 238, 365, 34);
+        CreateChildButton(parent, IDC_BTN_LAUNCH_CMD, L"Запустить CMD", 475, 184, 365, 26);
+        CreateChildButton(parent, IDC_BTN_LAUNCH_REGEDIT, L"Запустить Regedit", 475, 216, 365, 26);
+        CreateChildButton(parent, IDC_BTN_LANG_RESCUE, L"Экранная клавиатура / EN Раскладка", 475, 248, 365, 26);
 
         g_app.eventLog = CreateEventLogList(parent, IDC_EVENT_LOG, 24, 312, 836, 194);
     }
@@ -1658,6 +1867,9 @@ namespace
             break;
         case IDC_BTN_LAUNCH_REGEDIT:
             LaunchUtility(window, L"regedit.exe", L"Редактор реестра запущен.", L"Ошибка запуска Regedit");
+            break;
+        case IDC_BTN_LANG_RESCUE:
+            RunLanguageRescue(window);
             break;
         case IDC_BTN_KILL_PROCESS:
             KillSelectedProcess(window);

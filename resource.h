@@ -16,6 +16,7 @@
 #define IDC_BTN_RESTART_EXPLORER               2005
 #define IDC_BTN_LAUNCH_CMD                     2006
 #define IDC_BTN_LAUNCH_REGEDIT                 2007
+#define IDC_BTN_LANG_RESCUE                    2008
 #define IDC_GRP_CRITICAL                       2100
 #define IDC_GRP_SECURITY                       2101
 #define IDC_GRP_ENVIRONMENT                    2102
