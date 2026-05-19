@@ -115,10 +115,11 @@ namespace
 
     struct AppState
     {
+        static const int kPageCount = 3;
         HINSTANCE instance;
         HWND mainWindow;
         HWND tab;
-        HWND pages[3];
+        HWND pages[kPageCount];
         HWND processList;
         HWND startupList;
         HWND eventLog;
@@ -140,9 +141,10 @@ namespace
             font(nullptr),
             ownsFont(false)
         {
-            pages[0] = nullptr;
-            pages[1] = nullptr;
-            pages[2] = nullptr;
+            for (int i = 0; i < kPageCount; ++i)
+            {
+                pages[i] = nullptr;
+            }
         }
     };
 
@@ -511,40 +513,6 @@ namespace
         RegCloseKey(key);
     }
 
-    void DeleteRegistryValueWithAccessIfExists(OperationResult& result,
-                                               HKEY root,
-                                               const wchar_t* subKey,
-                                               const wchar_t* valueName,
-                                               REGSAM access,
-                                               REGSAM view)
-    {
-        HKEY key = nullptr;
-        LSTATUS status = OpenRegistryKey(root, subKey, access, view, &key);
-        if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND)
-        {
-            return;
-        }
-
-        if (status != ERROR_SUCCESS)
-        {
-            result.Add(L"Открытие ключа " + JoinRegistryLocation(root, subKey, view), status);
-            return;
-        }
-
-        status = RegDeleteValueW(key, valueName);
-        if (status == ERROR_SUCCESS)
-        {
-            AppendEventLog(L"[OK] Параметр " + std::wstring(valueName) + L" успешно удален.");
-        }
-        else if (status != ERROR_FILE_NOT_FOUND)
-        {
-            std::wstring name = valueName != nullptr && valueName[0] != L'\0' ? valueName : L"(по умолчанию)";
-            result.Add(L"Удаление значения " + name + L" из " + JoinRegistryLocation(root, subKey, view), status);
-        }
-
-        RegCloseKey(key);
-    }
-
     void DeleteRegistryKeyIfExists(OperationResult& result,
                                    HKEY root,
                                    const wchar_t* subKey,
@@ -573,7 +541,7 @@ namespace
             std::wstring keyName = subKey;
             size_t pos = keyName.find_last_of(L'\\');
             std::wstring leaf = (pos != std::wstring::npos) ? keyName.substr(pos + 1) : keyName;
-            AppendEventLog(L"[OK] Ветка IFEO " + leaf + L" уничтожена.");
+            AppendEventLog(L"[OK] Раздел реестра " + leaf + L" удален.");
         }
         else if (status != ERROR_FILE_NOT_FOUND && status != ERROR_PATH_NOT_FOUND)
         {
@@ -581,307 +549,119 @@ namespace
         }
     }
 
-    bool EnableDebugPrivilege(OperationResult& result)
+    void DeleteRegistryKeyRecursively(OperationResult& result,
+                                     HKEY root,
+                                     const wchar_t* subKey,
+                                     REGSAM view)
     {
-        HANDLE token = nullptr;
-        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
+        HKEY key = nullptr;
+        LSTATUS status = OpenRegistryKey(root, subKey, KEY_ALL_ACCESS, view, &key);
+        if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND)
         {
-            const DWORD error = GetLastError();
-            result.Add(L"Открытие токена процесса", error);
-            return false;
-        }
-
-        LUID luid;
-        if (!LookupPrivilegeValueW(nullptr, SE_DEBUG_NAME, &luid))
-        {
-            const DWORD error = GetLastError();
-            result.Add(L"Поиск привилегии SeDebugPrivilege", error);
-            CloseHandle(token);
-            return false;
-        }
-
-        TOKEN_PRIVILEGES privileges;
-        ZeroMemory(&privileges, sizeof(privileges));
-        privileges.PrivilegeCount = 1;
-        privileges.Privileges[0].Luid = luid;
-        privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-
-        SetLastError(ERROR_SUCCESS);
-        if (!AdjustTokenPrivileges(token, FALSE, &privileges, sizeof(privileges), nullptr, nullptr))
-        {
-            const DWORD error = GetLastError();
-            result.Add(L"Включение SeDebugPrivilege", error);
-            CloseHandle(token);
-            return false;
-        }
-
-        const DWORD adjustError = GetLastError();
-        CloseHandle(token);
-
-        if (adjustError == ERROR_NOT_ALL_ASSIGNED)
-        {
-            result.Add(L"Включение SeDebugPrivilege", adjustError);
-            return false;
-        }
-
-        return true;
-    }
-
-    bool Is64BitOperatingSystem()
-    {
-#if defined(_WIN64)
-        return true;
-#else
-        BOOL wow64 = FALSE;
-        if (IsWow64Process(GetCurrentProcess(), &wow64))
-        {
-            return wow64 != FALSE;
-        }
-
-        return false;
-#endif
-    }
-
-    LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
-    {
-        if (message == WM_ERASEBKGND)
-        {
-            HDC hdc = reinterpret_cast<HDC>(wParam);
-            RECT rect;
-            GetClientRect(hwnd, &rect);
-            FillRect(hdc, &rect, g_app.backgroundBrush);
-            return 1;
-        }
-        return CallWindowProcW(g_oldTabProc, hwnd, message, wParam, lParam);
-    }
-
-    LRESULT CALLBACK GroupBoxSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
-    {
-        if (message == WM_PAINT)
-        {
-            PAINTSTRUCT ps;
-            HDC hdc = BeginPaint(hwnd, &ps);
-
-            RECT rect;
-            GetClientRect(hwnd, &rect);
-
-            FillRect(hdc, &rect, g_app.backgroundBrush);
-
-            HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(45, 45, 45));
-            HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, borderPen));
-            HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(hdc, GetStockObject(NULL_BRUSH)));
-
-            wchar_t text[256] = L"";
-            GetWindowTextW(hwnd, text, 256);
-
-            SIZE textSize = {0, 0};
-            HFONT oldFont = static_cast<HFONT>(SelectObject(hdc, g_app.font));
-            if (wcslen(text) > 0)
-            {
-                GetTextExtentPoint32W(hdc, text, static_cast<int>(wcslen(text)), &textSize);
-            }
-
-            int topOffset = (textSize.cy > 0) ? (textSize.cy / 2) : 8;
-            Rectangle(hdc, rect.left, rect.top + topOffset, rect.right, rect.bottom);
-
-            if (wcslen(text) > 0)
-            {
-                RECT textRect = rect;
-                textRect.left += 10;
-                textRect.right = textRect.left + textSize.cx + 10;
-                textRect.bottom = textRect.top + textSize.cy;
-
-                FillRect(hdc, &textRect, g_app.backgroundBrush);
-
-                SetTextColor(hdc, RGB(255, 255, 255));
-                SetBkMode(hdc, TRANSPARENT);
-                DrawTextW(hdc, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            }
-
-            SelectObject(hdc, oldFont);
-            SelectObject(hdc, oldPen);
-            SelectObject(hdc, oldBrush);
-            DeleteObject(borderPen);
-
-            EndPaint(hwnd, &ps);
-            return 0;
-        }
-        return CallWindowProcW(g_oldGroupBoxProc, hwnd, message, wParam, lParam);
-    }
-
-    HWND CreateChildButton(HWND parent, int id, const wchar_t* text, int x, int y, int width, int height)
-    {
-        HWND button = CreateWindowExW(0,
-                                      L"BUTTON",
-                                      text,
-                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                                      x,
-                                      y,
-                                      width,
-                                      height,
-                                      parent,
-                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
-                                      g_app.instance,
-                                      nullptr);
-        ApplyFont(button);
-        return button;
-    }
-
-    HWND CreateGroupBox(HWND parent, int id, const wchar_t* text, int x, int y, int width, int height)
-    {
-        HWND groupBox = CreateWindowExW(0,
-                                        L"BUTTON",
-                                        text,
-                                        WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                                        x,
-                                        y,
-                                        width,
-                                        height,
-                                        parent,
-                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
-                                        g_app.instance,
-                                        nullptr);
-        ApplyFont(groupBox);
-
-        WNDPROC oldProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(groupBox, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(GroupBoxSubclassProc)));
-        if (g_oldGroupBoxProc == nullptr)
-        {
-            g_oldGroupBoxProc = oldProc;
-        }
-
-        return groupBox;
-    }
-
-    HWND CreateEventLogList(HWND parent, int id, int x, int y, int width, int height)
-    {
-        HWND list = CreateWindowExW(WS_EX_CLIENTEDGE,
-                                    WC_LISTBOXW,
-                                    L"",
-                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WS_HSCROLL |
-                                    LBS_NOINTEGRALHEIGHT | LBS_DISABLENOSCROLL,
-                                    x,
-                                    y,
-                                    width,
-                                    height,
-                                    parent,
-                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
-                                    g_app.instance,
-                                    nullptr);
-        ApplyFont(list);
-        SendMessageW(list, LB_SETHORIZONTALEXTENT, 2200, 0);
-        return list;
-    }
-
-    void AddListViewColumn(HWND list, int index, const wchar_t* text, int width)
-    {
-        LVCOLUMNW column;
-        ZeroMemory(&column, sizeof(column));
-        column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-        column.pszText = const_cast<LPWSTR>(text);
-        column.cx = width;
-        column.iSubItem = index;
-        ListView_InsertColumn(list, index, &column);
-    }
-
-    HWND CreateReportList(HWND parent, int id, int x, int y, int width, int height)
-    {
-        HWND list = CreateWindowExW(WS_EX_CLIENTEDGE,
-                                    WC_LISTVIEWW,
-                                    L"",
-                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-                                    LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-                                    x,
-                                    y,
-                                    width,
-                                    height,
-                                    parent,
-                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
-                                    g_app.instance,
-                                    nullptr);
-
-        ApplyFont(list);
-        ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
-        ListView_SetBkColor(list, kColorBackground);
-        ListView_SetTextBkColor(list, kColorBackground);
-        ListView_SetTextColor(list, kColorText);
-        return list;
-    }
-
-    void RefreshProcessList(HWND owner)
-    {
-        ListView_DeleteAllItems(g_app.processList);
-
-        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (snapshot == INVALID_HANDLE_VALUE)
-        {
-            const DWORD error = GetLastError();
-            ShowWin32Error(owner, L"Создание снимка процессов", error);
             return;
         }
 
-        PROCESSENTRY32W entry;
-        ZeroMemory(&entry, sizeof(entry));
-        entry.dwSize = sizeof(entry);
-
-        if (!Process32FirstW(snapshot, &entry))
+        if (status != ERROR_SUCCESS)
         {
-            const DWORD error = GetLastError();
-            CloseHandle(snapshot);
-            ShowWin32Error(owner, L"Чтение первого процесса", error);
+            result.Add(L"Открытие ветки для удаления " + JoinRegistryLocation(root, subKey, view), status);
             return;
         }
 
-        int row = 0;
-        do
+        HMODULE advapi = GetModuleHandleW(L"advapi32.dll");
+        typedef LSTATUS (APIENTRY *PFN_RegDeleteTreeW)(HKEY, LPCWSTR);
+        PFN_RegDeleteTreeW pRegDeleteTreeW = nullptr;
+        if (advapi)
         {
-            LVITEMW item;
-            ZeroMemory(&item, sizeof(item));
-            item.mask = LVIF_TEXT | LVIF_PARAM;
-            item.iItem = row;
-            item.pszText = entry.szExeFile;
-            item.lParam = static_cast<LPARAM>(entry.th32ProcessID);
-
-            const int inserted = ListView_InsertItem(g_app.processList, &item);
-            if (inserted >= 0)
-            {
-                std::wstring pid = std::to_wstring(entry.th32ProcessID);
-                ListView_SetItemText(g_app.processList, inserted, 1, const_cast<LPWSTR>(pid.c_str()));
-            }
-
-            ++row;
-        }
-        while (Process32NextW(snapshot, &entry));
-
-        const DWORD lastError = GetLastError();
-        if (lastError != ERROR_NO_MORE_FILES)
-        {
-            ShowWin32Error(owner, L"Перечисление процессов", lastError);
+            pRegDeleteTreeW = reinterpret_cast<PFN_RegDeleteTreeW>(GetProcAddress(advapi, "RegDeleteTreeW"));
         }
 
-        CloseHandle(snapshot);
+        if (pRegDeleteTreeW)
+        {
+            status = pRegDeleteTreeW(key, nullptr);
+        }
+        else
+        {
+            status = ERROR_CALL_NOT_IMPLEMENTED;
+        }
+        RegCloseKey(key);
+
+        if (status == ERROR_SUCCESS || status == ERROR_CALL_NOT_IMPLEMENTED)
+        {
+            DeleteRegistryKeyIfExists(result, root, subKey, view);
+        }
+        else
+        {
+            result.Add(L"Рекурсивное удаление содержимого " + JoinRegistryLocation(root, subKey, view), status);
+        }
     }
 
-    bool GetSelectedListParam(HWND list, LPARAM* value)
+    void RestoreHostsFile()
     {
-        const int index = ListView_GetNextItem(list, -1, LVNI_SELECTED);
-        if (index < 0)
+        AppendEventLog(L"[INFO] Восстановление файла hosts...");
+        wchar_t systemDir[MAX_PATH];
+        if (GetSystemDirectoryW(systemDir, MAX_PATH) == 0)
         {
-            return false;
+            AppendEventLog(L"[ERROR] Не удалось получить путь к System32.");
+            return;
         }
 
-        LVITEMW item;
-        ZeroMemory(&item, sizeof(item));
-        item.mask = LVIF_PARAM;
-        item.iItem = index;
+        std::wstring hostsPath = std::wstring(systemDir) + L"\\drivers\\etc\\hosts";
 
-        if (!ListView_GetItem(list, &item))
+        const char hostsTemplate[] = 
+            "# Default safe hosts file restored by AegisCore\r\n"
+            "127.0.0.1       localhost\r\n"
+            "::1             localhost\r\n";
+
+        HANDLE file = CreateFileW(hostsPath.c_str(),
+                                  GENERIC_WRITE,
+                                  0,
+                                  nullptr,
+                                  CREATE_ALWAYS,
+                                  FILE_ATTRIBUTE_NORMAL,
+                                  nullptr);
+
+        if (file == INVALID_HANDLE_VALUE)
         {
-            return false;
+            DWORD error = GetLastError();
+            AppendEventLog(L"[ERROR] Ошибка доступа к hosts: " + std::to_wstring(error));
+            return;
         }
 
-        *value = item.lParam;
-        return true;
+        DWORD written = 0;
+        BOOL success = WriteFile(file, hostsTemplate, static_cast<DWORD>(strlen(hostsTemplate)), &written, nullptr);
+        CloseHandle(file);
+
+        if (success)
+        {
+            AppendEventLog(L"[OK] Файл hosts успешно восстановлен к стандартному виду.");
+        }
+        else
+        {
+            AppendEventLog(L"[ERROR] Ошибка записи в файл hosts.");
+        }
     }
+
+    bool EnableDebugPrivilege(OperationResult& result);
+
+    bool Is64BitOperatingSystem();
+
+    LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+
+    LRESULT CALLBACK GroupBoxSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+
+    HWND CreateChildButton(HWND parent, int id, const wchar_t* text, int x, int y, int width, int height);
+
+    HWND CreateGroupBox(HWND parent, int id, const wchar_t* text, int x, int y, int width, int height);
+
+    HWND CreateEventLogList(HWND parent, int id, int x, int y, int width, int height);
+
+    void AddListViewColumn(HWND list, int index, const wchar_t* text, int width);
+
+    HWND CreateReportList(HWND parent, int id, int x, int y, int width, int height);
+
+    void RefreshProcessList(HWND owner);
+
+    bool GetSelectedListParam(HWND list, LPARAM* value);
 
     void KillSelectedProcess(HWND owner)
     {
@@ -893,7 +673,32 @@ namespace
         }
 
         const DWORD pid = static_cast<DWORD>(value);
-        HANDLE process = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+        HANDLE process = OpenProcess(PROCESS_TERMINATE | PROCESS_SET_INFORMATION, FALSE, pid);
+        bool criticalFlagStripped = false;
+        if (process == nullptr)
+        {
+            process = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+        }
+        else
+        {
+            HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+            if (ntdll)
+            {
+                typedef LONG (NTAPI *PFN_NtSetInformationProcess)(HANDLE, ULONG, PVOID, ULONG);
+                PFN_NtSetInformationProcess pNtSetInformationProcess = 
+                    reinterpret_cast<PFN_NtSetInformationProcess>(GetProcAddress(ntdll, "NtSetInformationProcess"));
+                if (pNtSetInformationProcess)
+                {
+                    ULONG breakOnTermination = 0;
+                    LONG status = pNtSetInformationProcess(process, 29, &breakOnTermination, sizeof(breakOnTermination));
+                    if (status >= 0)
+                    {
+                        criticalFlagStripped = true;
+                    }
+                }
+            }
+        }
+
         if (process == nullptr)
         {
             const DWORD error = GetLastError();
@@ -912,7 +717,14 @@ namespace
         }
 
         CloseHandle(process);
-        AppendEventLog(L"Процесс завершён: PID " + std::to_wstring(pid) + L".");
+        if (criticalFlagStripped)
+        {
+            AppendEventLog(L"[OK] Флаг критического процесса снят. Вирус уничтожен (PID " + std::to_wstring(pid) + L").");
+        }
+        else
+        {
+            AppendEventLog(L"Процесс завершён: PID " + std::to_wstring(pid) + L".");
+        }
         RefreshProcessList(owner);
     }
 
@@ -960,7 +772,6 @@ namespace
 
         for (size_t keyIndex = 0; keyIndex < sizeof(policyKeys) / sizeof(policyKeys[0]); ++keyIndex)
         {
-            // Auto-create parent path if missing
             HKEY hKeyCU = nullptr;
             if (CreateRegistryKey(HKEY_CURRENT_USER, policyKeys[keyIndex], KEY_WRITE, 0, &hKeyCU) == ERROR_SUCCESS)
             {
@@ -978,6 +789,16 @@ namespace
                 DeleteRegistryValueIfExists(result, HKEY_LOCAL_MACHINE, policyKeys[keyIndex], values[valueIndex], KEY_WOW64_64KEY);
             }
         }
+
+        // Wipe DisallowRun
+        DeleteRegistryValueIfExists(result, HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer", L"DisallowRun", 0);
+        DeleteRegistryValueIfExists(result, HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer", L"DisallowRun", KEY_WOW64_64KEY);
+
+        DeleteRegistryKeyRecursively(result, HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer\\DisallowRun", 0);
+        DeleteRegistryKeyRecursively(result, HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer\\DisallowRun", KEY_WOW64_64KEY);
+
+        // Restore hosts file
+        RestoreHostsFile();
 
         ShowResult(owner,
                    L"Ограничения ОС сняты.",
@@ -1366,12 +1187,10 @@ namespace
     {
         AppendEventLog(L"[INFO] Запуск спасательной службы ввода...");
 
-        // 1. Force load and activate EN keyboard layout
         HKL hkl = LoadKeyboardLayoutW(L"00000409", KLF_ACTIVATE | KLF_SETFORPROCESS);
         if (hkl != nullptr)
         {
             AppendEventLog(L"[OK] Раскладка EN (00000409) загружена в процесс.");
-            // Apply to foreground window and broadcast
             HWND fg = GetForegroundWindow();
             if (fg != nullptr)
             {
@@ -1385,7 +1204,6 @@ namespace
             AppendEventLog(L"[ERROR] Ошибка вызова LoadKeyboardLayoutW: " + std::to_wstring(GetLastError()));
         }
 
-        // 2. Launch osk.exe (On-Screen Keyboard) from System32 with WOW64 redirection disabled
         wchar_t sysDir[MAX_PATH];
         if (GetSystemDirectoryW(sysDir, MAX_PATH) != 0)
         {
@@ -1445,6 +1263,143 @@ namespace
         else
         {
             AppendEventLog(L"[ERROR] Не удалось получить путь к System32.");
+        }
+    }
+
+    std::wstring GetCurrentUserName()
+    {
+        wchar_t buffer[256];
+        DWORD size = 256;
+        if (GetUserNameW(buffer, &size))
+        {
+            return buffer;
+        }
+        return L"";
+    }
+
+    void ResetUserPassword(HWND owner)
+    {
+        AppendEventLog(L"[INFO] Инициация сброса пароля пользователя...");
+
+        std::wstring username = GetCurrentUserName();
+        if (username.empty())
+        {
+            AppendEventLog(L"[WARNING] Имя текущего пользователя не найдено. Попытка сброса для Administrator.");
+            username = L"Administrator";
+        }
+
+        AppendEventLog(L"[INFO] Целевой пользователь: " + username);
+
+        wchar_t systemDir[MAX_PATH];
+        if (GetSystemDirectoryW(systemDir, MAX_PATH) == 0)
+        {
+            AppendEventLog(L"[ERROR] Не удалось получить путь к System32.");
+            return;
+        }
+
+        std::wstring netPath = std::wstring(systemDir) + L"\\net.exe";
+
+        STARTUPINFOW si;
+        PROCESS_INFORMATION pi;
+        ZeroMemory(&si, sizeof(si));
+        si.cb = sizeof(si);
+        ZeroMemory(&pi, sizeof(pi));
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+
+        PVOID oldRedirectState = nullptr;
+        HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+        typedef BOOL (WINAPI *PFN_Wow64DisableWow64FsRedirection)(PVOID*);
+        typedef BOOL (WINAPI *PFN_Wow64RevertWow64FsRedirection)(PVOID);
+        
+        PFN_Wow64DisableWow64FsRedirection pDisable = nullptr;
+        PFN_Wow64RevertWow64FsRedirection pRevert = nullptr;
+        if (kernel32)
+        {
+            pDisable = reinterpret_cast<PFN_Wow64DisableWow64FsRedirection>(GetProcAddress(kernel32, "Wow64DisableWow64FsRedirection"));
+            pRevert = reinterpret_cast<PFN_Wow64RevertWow64FsRedirection>(GetProcAddress(kernel32, "Wow64RevertWow64FsRedirection"));
+        }
+
+        if (pDisable)
+        {
+            pDisable(&oldRedirectState);
+        }
+
+        std::wstring cmdLine = L"\"" + netPath + L"\" user \"" + username + L"\" 1";
+        BOOL success = CreateProcessW(nullptr,
+                                     &cmdLine[0],
+                                     nullptr,
+                                     nullptr,
+                                     FALSE,
+                                     CREATE_NO_WINDOW,
+                                     nullptr,
+                                     nullptr,
+                                     &si,
+                                     &pi);
+
+        if (pRevert && oldRedirectState)
+        {
+            pRevert(oldRedirectState);
+        }
+
+        if (success)
+        {
+            WaitForSingleObject(pi.hProcess, 5000);
+            DWORD exitCode = 0;
+            GetExitCodeProcess(pi.hProcess, &exitCode);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+
+            if (exitCode == 0)
+            {
+                AppendEventLog(L"[OK] Пароль пользователя \"" + username + L"\" успешно сброшен на '1'.");
+            }
+            else
+            {
+                AppendEventLog(L"[ERROR] Утилита net.exe вернула ошибку: " + std::to_wstring(exitCode));
+                if (username != L"Администратор")
+                {
+                    AppendEventLog(L"[INFO] Пробуем сбросить пароль для учетной записи 'Администратор'...");
+                    
+                    if (pDisable)
+                    {
+                        pDisable(&oldRedirectState);
+                    }
+                    
+                    std::wstring fallbackCmd = L"\"" + netPath + L"\" user \"Администратор\" 1";
+                    ZeroMemory(&si, sizeof(si));
+                    si.cb = sizeof(si);
+                    si.dwFlags = STARTF_USESHOWWINDOW;
+                    si.wShowWindow = SW_HIDE;
+                    ZeroMemory(&pi, sizeof(pi));
+                    
+                    success = CreateProcessW(nullptr, &fallbackCmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+                    
+                    if (pRevert && oldRedirectState)
+                    {
+                        pRevert(oldRedirectState);
+                    }
+                    
+                    if (success)
+                    {
+                        WaitForSingleObject(pi.hProcess, 5000);
+                        GetExitCodeProcess(pi.hProcess, &exitCode);
+                        CloseHandle(pi.hProcess);
+                        CloseHandle(pi.hThread);
+                        if (exitCode == 0)
+                        {
+                            AppendEventLog(L"[OK] Пароль пользователя \"Администратор\" успешно сброшен на '1'.");
+                            return;
+                        }
+                    }
+                }
+                AppendEventLog(L"[WARNING] Рекомендуется использовать встроенную CMD для ручного сброса через 'net user'.");
+            }
+        }
+        else
+        {
+            DWORD err = GetLastError();
+            AppendEventLog(L"[ERROR] Не удалось запустить net.exe (код ошибки: " + std::to_wstring(err) + L").");
         }
     }
 
@@ -1508,7 +1463,7 @@ namespace
 
         if (status != ERROR_SUCCESS)
         {
-            result.Add(L"Чтение сведений ключа автозагрузки " + JoinRegistryLocation(root, subKey, view), status);
+            result.Add(L"Чтение сведения ключа автозагрузки " + JoinRegistryLocation(root, subKey, view), status);
             RegCloseKey(key);
             return;
         }
@@ -1559,6 +1514,53 @@ namespace
         }
 
         RegCloseKey(key);
+    }
+
+    void CheckAppInitDlls(OperationResult& result, REGSAM view)
+    {
+        HKEY key = nullptr;
+        const wchar_t* subKey = L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows";
+        LSTATUS status = OpenRegistryKey(HKEY_LOCAL_MACHINE, subKey, KEY_QUERY_VALUE, view, &key);
+        if (status != ERROR_SUCCESS)
+        {
+            return;
+        }
+
+        wchar_t data[2048] = L"";
+        DWORD size = sizeof(data);
+        DWORD type = 0;
+        status = RegQueryValueExW(key, L"AppInit_DLLs", nullptr, &type, reinterpret_cast<BYTE*>(data), &size);
+        RegCloseKey(key);
+
+        if (status == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ))
+        {
+            std::wstring dataStr = data;
+            while (!dataStr.empty() && (dataStr.back() == L' ' || dataStr.back() == L'\t'))
+            {
+                dataStr.pop_back();
+            }
+            size_t start = 0;
+            while (start < dataStr.size() && (dataStr[start] == L' ' || dataStr[start] == L'\t'))
+            {
+                start++;
+            }
+            dataStr = dataStr.substr(start);
+
+            if (!dataStr.empty())
+            {
+                StartupEntry entry;
+                entry.kind = StartupEntryKind::Registry;
+                entry.root = HKEY_LOCAL_MACHINE;
+                entry.registryView = view;
+                entry.valueName = L"AppInit_DLLs";
+                entry.subKey = subKey;
+                entry.filePath.clear();
+                entry.name = L"AppInit_DLLs";
+                entry.command = dataStr;
+                entry.location = JoinRegistryLocation(HKEY_LOCAL_MACHINE, subKey, view);
+                AppendStartupEntry(entry);
+            }
+        }
     }
 
     void EnumerateStartupFolder(OperationResult& result, int folderId, const wchar_t* locationName)
@@ -1638,11 +1640,16 @@ namespace
             EnumerateRegistryStartupKey(result, HKEY_LOCAL_MACHINE, runOnceKey, KEY_WOW64_64KEY);
             EnumerateRegistryStartupKey(result, HKEY_LOCAL_MACHINE, runKey, KEY_WOW64_32KEY);
             EnumerateRegistryStartupKey(result, HKEY_LOCAL_MACHINE, runOnceKey, KEY_WOW64_32KEY);
+
+            CheckAppInitDlls(result, KEY_WOW64_64KEY);
+            CheckAppInitDlls(result, KEY_WOW64_32KEY);
         }
         else
         {
             EnumerateRegistryStartupKey(result, HKEY_LOCAL_MACHINE, runKey, 0);
             EnumerateRegistryStartupKey(result, HKEY_LOCAL_MACHINE, runOnceKey, 0);
+
+            CheckAppInitDlls(result, 0);
         }
 
         EnumerateStartupFolder(result, CSIDL_STARTUP, L"Папка автозагрузки пользователя");
@@ -1756,9 +1763,10 @@ namespace
         CreateChildButton(parent, IDC_BTN_RESTART_EXPLORER, L"Перезапустить Проводник", 44, 238, 365, 34);
 
         CreateGroupBox(parent, IDC_GRP_UTILITIES, L"Утилиты", 455, 162, 405, 126);
-        CreateChildButton(parent, IDC_BTN_LAUNCH_CMD, L"Запустить CMD", 475, 184, 365, 26);
-        CreateChildButton(parent, IDC_BTN_LAUNCH_REGEDIT, L"Запустить Regedit", 475, 216, 365, 26);
-        CreateChildButton(parent, IDC_BTN_LANG_RESCUE, L"Экранная клавиатура / EN Раскладка", 475, 248, 365, 26);
+        CreateChildButton(parent, IDC_BTN_LAUNCH_CMD, L"Запустить CMD", 475, 180, 365, 24);
+        CreateChildButton(parent, IDC_BTN_LAUNCH_REGEDIT, L"Запустить Regedit", 475, 208, 365, 24);
+        CreateChildButton(parent, IDC_BTN_RESET_PASSWORD, L"Сбросить пароль на '1'", 475, 236, 365, 24);
+        CreateChildButton(parent, IDC_BTN_LANG_RESCUE, L"Экранная клав. / EN Язык", 475, 264, 365, 24);
 
         g_app.eventLog = CreateEventLogList(parent, IDC_EVENT_LOG, 24, 312, 836, 194);
     }
@@ -1871,6 +1879,9 @@ namespace
         case IDC_BTN_LANG_RESCUE:
             RunLanguageRescue(window);
             break;
+        case IDC_BTN_RESET_PASSWORD:
+            ResetUserPassword(window);
+            break;
         case IDC_BTN_KILL_PROCESS:
             KillSelectedProcess(window);
             break;
@@ -1952,6 +1963,7 @@ namespace
         default:
             return DefWindowProcW(window, message, wParam, lParam);
         }
+        return 0;
     }
 
     LRESULT CALLBACK MainWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
@@ -2113,6 +2125,7 @@ namespace
         default:
             return DefWindowProcW(window, message, wParam, lParam);
         }
+        return 0;
     }
 
     bool RegisterApplicationClasses(HINSTANCE instance)
