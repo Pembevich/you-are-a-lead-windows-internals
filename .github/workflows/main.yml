@@ -8,7 +8,8 @@ jobs:
     - name: Setup MSVC Developer Command Prompt
       uses: ilammy/msvc-dev-cmd@v1
     - name: Compile C++ Code
-      run: cl /nologo /EHsc /MT /W4 /DUNICODE /D_UNICODE /utf-8 main.cpp /link /SUBSYSTEM:WINDOWS /OUT:AegisCore.exe
+      run: |
+        cl /nologo /EHsc /MT /W4 /DUNICODE /D_UNICODE /utf-8 main.cpp /link /SUBSYSTEM:WINDOWS /MANIFESTUAC:"level='requireAdministrator' uiAccess='false'" user32.lib gdi32.lib advapi32.lib shell32.lib comctl32.lib /OUT:AegisCore.exe
     - name: Upload EXE Artifact
       uses: actions/upload-artifact@v4
       with:
