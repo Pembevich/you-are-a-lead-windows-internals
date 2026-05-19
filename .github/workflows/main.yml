@@ -1,0 +1,16 @@
+name: Build AegisCore
+on: [push]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Setup MSVC Developer Command Prompt
+      uses: ilammy/msvc-dev-cmd@v1
+    - name: Compile C++ Code
+      run: cl /nologo /EHsc /MT /W4 /DUNICODE /D_UNICODE /utf-8 main.cpp /link /SUBSYSTEM:WINDOWS /OUT:AegisCore.exe
+    - name: Upload EXE Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: AegisCore-App
+        path: AegisCore.exe
