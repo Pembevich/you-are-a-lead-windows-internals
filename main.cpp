@@ -25,7 +25,7 @@
 namespace
 {
     const wchar_t kApplicationTitle[] = L"AegisCore System Restorer";
-    const wchar_t kApplicationSignature[] = L"AegisCore System Restorer | Pumbevich | 2026";
+    const wchar_t kApplicationSignature[] = L"AegisCore System Restorer";
     const wchar_t kMainWindowClass[] = L"AegisCoreMainWindow";
     const wchar_t kPageWindowClass[] = L"AegisCorePageWindow";
 
@@ -316,12 +316,13 @@ namespace
 
         if (status == ERROR_INVALID_PARAMETER && view != 0)
         {
+            const REGSAM nativeAccess = access & ~(KEY_WOW64_64KEY | KEY_WOW64_32KEY);
             status = RegCreateKeyExW(root,
                                      subKey,
                                      0,
                                      nullptr,
                                      REG_OPTION_NON_VOLATILE,
-                                     access,
+                                     nativeAccess,
                                      nullptr,
                                      key,
                                      nullptr);
@@ -339,7 +340,8 @@ namespace
         LSTATUS status = RegOpenKeyExW(root, subKey, 0, access | view, key);
         if (status == ERROR_INVALID_PARAMETER && view != 0)
         {
-            status = RegOpenKeyExW(root, subKey, 0, access, key);
+            const REGSAM nativeAccess = access & ~(KEY_WOW64_64KEY | KEY_WOW64_32KEY);
+            status = RegOpenKeyExW(root, subKey, 0, nativeAccess, key);
         }
 
         return status;
@@ -384,6 +386,36 @@ namespace
     {
         HKEY key = nullptr;
         LSTATUS status = OpenRegistryKey(root, subKey, KEY_SET_VALUE, view, &key);
+        if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND)
+        {
+            return;
+        }
+
+        if (status != ERROR_SUCCESS)
+        {
+            result.Add(L"Открытие ключа " + JoinRegistryLocation(root, subKey, view), status);
+            return;
+        }
+
+        status = RegDeleteValueW(key, valueName);
+        if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+        {
+            std::wstring name = valueName != nullptr && valueName[0] != L'\0' ? valueName : L"(по умолчанию)";
+            result.Add(L"Удаление значения " + name + L" из " + JoinRegistryLocation(root, subKey, view), status);
+        }
+
+        RegCloseKey(key);
+    }
+
+    void DeleteRegistryValueWithAccessIfExists(OperationResult& result,
+                                               HKEY root,
+                                               const wchar_t* subKey,
+                                               const wchar_t* valueName,
+                                               REGSAM access,
+                                               REGSAM view)
+    {
+        HKEY key = nullptr;
+        LSTATUS status = OpenRegistryKey(root, subKey, access, view, &key);
         if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND)
         {
             return;
@@ -697,10 +729,20 @@ namespace
         {
             std::wstring key = baseKey;
             key += targets[index];
-            DeleteRegistryValueIfExists(result, HKEY_LOCAL_MACHINE, key.c_str(), L"Debugger", KEY_WOW64_64KEY);
+            DeleteRegistryValueWithAccessIfExists(result,
+                                                  HKEY_LOCAL_MACHINE,
+                                                  key.c_str(),
+                                                  L"Debugger",
+                                                  KEY_ALL_ACCESS | KEY_WOW64_64KEY,
+                                                  KEY_WOW64_64KEY);
             if (Is64BitOperatingSystem())
             {
-                DeleteRegistryValueIfExists(result, HKEY_LOCAL_MACHINE, key.c_str(), L"Debugger", KEY_WOW64_32KEY);
+                DeleteRegistryValueWithAccessIfExists(result,
+                                                      HKEY_LOCAL_MACHINE,
+                                                      key.c_str(),
+                                                      L"Debugger",
+                                                      KEY_ALL_ACCESS | KEY_WOW64_32KEY,
+                                                      KEY_WOW64_32KEY);
             }
         }
 
@@ -746,6 +788,18 @@ namespace
     void RestoreSafeBoot(HWND owner)
     {
         OperationResult result;
+        SetRegistryString(result,
+                          HKEY_LOCAL_MACHINE,
+                          L"SYSTEM\\CurrentControlSet\\Control\\SafeBoot\\Minimal",
+                          nullptr,
+                          L"Safe Mode",
+                          0);
+        SetRegistryString(result,
+                          HKEY_LOCAL_MACHINE,
+                          L"SYSTEM\\CurrentControlSet\\Control\\SafeBoot\\Network",
+                          nullptr,
+                          L"Network",
+                          0);
 
         struct SafeBootItem
         {
